@@ -1,0 +1,84 @@
+[
+  {
+    "video_id": "b210a9a9-9f3d-4084-bbbf-e7b2d71c4354",
+    "title": "Rick Astley - Never Gonna Give You Up",
+    "description": "The GOAT",
+    "genre": "General",
+    "tags": [
+      "music",
+      "rickroll"
+    ],
+    "visibility": "public",
+    "status": "published",
+    "s3_key": "videos/b210a9a9-9f3d-4084-bbbf-e7b2d71c4354/video.mp4",
+    "manifest_url": null,
+    "thumbnail_url": "thumbnails/b210a9a9-9f3d-4084-bbbf-e7b2d71c4354/thumb.jpg",
+    "duration_seconds": "212.6",
+    "created_at": "2026-06-03T17:19:41.607489649+00:00"
+  },
+  {
+    "video_id": "aa938f69-b181-4406-9c34-13dd1e9b453b",
+    "title": "Apple - 1984",
+    "description": "Obey.",
+    "genre": "General",
+    "tags": [
+      "apple",
+      "commercial"
+    ],
+    "visibility": null,
+    "status": "published",
+    "s3_key": "videos/aa938f69-b181-4406-9c34-13dd1e9b453b/video.mp4",
+    "manifest_url": null,
+    "thumbnail_url": "thumbnails/aa938f69-b181-4406-9c34-13dd1e9b453b/thumb.jpg",
+    "duration_seconds": "61.1",
+    "created_at": "2026-06-03T17:26:40.323194812+00:00"
+  },
+  {
+    "video_id": "497d18fe-91e5-460f-85b4-33525c0578f7",
+    "title": "The Internet Cafe: Hackers 101",
+    "description": "1990s found footage",
+    "genre": "General",
+    "tags": [
+      "90s",
+      "hackers"
+    ],
+    "visibility": null,
+    "status": "published",
+    "s3_key": "videos/497d18fe-91e5-460f-85b4-33525c0578f7/video.mp4",
+    "manifest_url": null,
+    "thumbnail_url": "thumbnails/497d18fe-91e5-460f-85b4-33525c0578f7/thumb.jpg",
+    "duration_seconds": "1576.7",
+    "created_at": "2026-06-03T17:49:46.879470165+00:00"
+  },
+  {
+    "video_id": "ae3ff512-d5ee-40bf-81a7-8381b2d0388e",
+    "title": "Experiments in motion graphics",
+    "description": "From 1968. John H. Whitney explains the graphic art potential of the computer and the methods and philosophy involved in his computer film making.",
+    "genre": "General",
+    "tags": [
+      "computers",
+      "graphics"
+    ],
+    "visibility": "public",
+    "status": "published",
+    "s3_key": "videos/ae3ff512-d5ee-40bf-81a7-8381b2d0388e/video.mp4",
+    "manifest_url": null,
+    "thumbnail_url": "thumbnails/ae3ff512-d5ee-40bf-81a7-8381b2d0388e/thumb.jpg",
+    "duration_seconds": "714.2",
+    "created_at": "2026-06-03T20:57:04.752265371+00:00"
+  },
+  {
+    "video_id": "27e22ae7-22e7-4bfd-9db5-0f59227a029d",
+    "title": "THE GOAT",
+    "description": "THE GOAT",
+    "genre": "General",
+    "tags": [],
+    "visibility": "public",
+    "status": "published",
+    "s3_key": "mp4/27e22ae7-22e7-4bfd-9db5-0f59227a029d/Rick_Astley_Never_Gonna_Give_You_Upvideo.mp4",
+    "manifest_url": "https://cdn.watch.example.com/hls/27e22ae7-22e7-4bfd-9db5-0f59227a029d/Rick_Astley_Never_Gonna_Give_You_Up.m3u8",
+    "thumbnail_url": "thumbnails/27e22ae7-22e7-4bfd-9db5-0f59227a029d/Rick_Astley_Never_Gonna_Give_You_Upthumb.0000001.jpg",
+    "duration_seconds": "212.6",
+    "created_at": "2026-06-12T15:43:30.211743799+00:00"
+  }
+]

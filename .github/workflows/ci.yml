@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (lint + test)
+    runs-on: ubuntu-latest
+    services:
+      localstack:
+        image: localstack/localstack:4.4
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3,sqs
+          GATEWAY_LISTEN: 0.0.0.0:4566
+      opensearch:
+        image: opensearchproject/opensearch:2
+        ports:
+          - 9200:9200
+        env:
+          discovery.type: single-node
+          DISABLE_SECURITY_PLUGIN: "true"
+          OPENSEARCH_INITIAL_ADMIN_PASSWORD: Admin_1234
+    steps:
+      - uses: actions/checkout@v4
+      # The Rust workspace (many AWS SDK crates + reqwest/rustls/aws-lc) plus the three
+      # localstack/opensearch/dynamodb service images fill the ~14 GB runner disk during the
+      # `cargo test --all` link step, making `ld` die with SIGBUS. Reclaim the large preinstalled
+      # toolchains we never use (Android SDK, .NET, GHC/Haskell, CodeQL) for build headroom.
+      - name: Free up disk space
+        run: |
+          echo "Before:"; df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          echo "After:"; df -h /
+      - name: Start DynamoDB Local
+        run: |
+          docker run -d --name dynamodb-local -p 8000:8000 amazon/dynamodb-local:latest -jar DynamoDBLocal.jar -sharedDb -inMemory
+          sleep 2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services
+      - name: Format check
+        run: cargo fmt --all -- --check
+        working-directory: services
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+        working-directory: services
+      - name: Tests
+        run: cargo test --all -- --test-threads=1
+        working-directory: services
+        env:
+          DYNAMODB_ENDPOINT: http://localhost:8000
+          S3_ENDPOINT: http://localhost:4566
+          SQS_ENDPOINT: http://localhost:4566
+          OPENSEARCH_ENDPOINT: http://localhost:9200
+          DISABLE_SES: "1"
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: us-west-2
+
+  frontend:
+    name: Frontend (lint + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: check-frontend
+        name: Check if frontend exists
+        run: test -f frontend/package.json && echo "exists=true" >> $GITHUB_OUTPUT || echo "exists=false" >> $GITHUB_OUTPUT
+      - uses: actions/setup-node@v4
+        if: steps.check-frontend.outputs.exists == 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        if: steps.check-frontend.outputs.exists == 'true'
+        run: npm ci
+        working-directory: frontend
+      - name: Lint
+        if: steps.check-frontend.outputs.exists == 'true'
+        run: npm run lint
+        working-directory: frontend
+      - name: Type check
+        if: steps.check-frontend.outputs.exists == 'true'
+        run: npm run type-check
+        working-directory: frontend
+      - name: Tests
+        if: steps.check-frontend.outputs.exists == 'true'
+        run: npm test -- --passWithNoTests
+        working-directory: frontend
+
+  terraform:
+    name: Terraform (fmt + validate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Format check
+        run: terraform fmt -recursive -check
+        working-directory: infra
+      # Validate every root stack. Modules (vpc, eks, irsa, global-data, regional-data, ...) are
+      # validated transitively via the roots that consume them. Add new root stacks to this list.
+      - name: Validate all stacks
+        run: |
+          set -e
+          for dir in \
+            bootstrap \
+            global \
+            data \
+            cdn \
+            environments/dev/us-west-2 \
+            environments/dev/us-east-2; do
+            echo "== validating infra/$dir =="
+            ( cd "infra/$dir" && terraform init -backend=false -input=false && terraform validate )
+          done
+
+  helm:
+    name: Helm (lint + template)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      # Lint validates Chart.yaml + values + template syntax; template render catches Go-template
+      # errors that lint alone can miss. Covers both the shared service chart and the canary chart.
+      - name: Lint charts
+        run: |
+          helm lint helm/rewind-service
+          helm lint helm/canary
+      - name: Render charts
+        run: |
+          helm template rewind-service helm/rewind-service > /dev/null
+          helm template canary helm/canary > /dev/null

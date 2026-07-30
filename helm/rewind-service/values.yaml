@@ -1,0 +1,49 @@
+replicaCount: 2
+
+image:
+  repository: ""
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 3000
+
+container:
+  port: 3000
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+health:
+  path: /health
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+# PodDisruptionBudget (rendered for non-cronjob releases — see templates/pdb.yaml).
+pdb:
+  maxUnavailable: 1
+
+env: []
+
+serviceAccount:
+  roleArn: ""
+
+# When cronjob.enabled is true, this release renders a CronJob instead of a Deployment + Service
+# (used by the transcode-reconcile sweep). Default false: normal
+# service releases are unaffected and keep rendering their Deployment + Service.
+cronjob:
+  enabled: false
+  schedule: "0 * * * *"   # hourly
+  args: []                # container args, e.g. ["reconcile"]
+  concurrencyPolicy: Forbid
+  restartPolicy: Never
+  backoffLimit: 1
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3

@@ -1,0 +1,10 @@
+apiVersion: v2
+name: canary
+description: >-
+  Cloud integration canary. A standalone chart — deliberately separate from the
+  shared rewind-service chart — that deploys the scheduled canary CronJobs (shallow + deep) and
+  their IRSA ServiceAccount. The long-running services are unrelated to this batch workload, so
+  their chart is left untouched.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

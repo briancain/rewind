@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Light mode: override Tailwind's generated neutral CSS variables when .dark is absent */
+html:not(.dark), html:not(.dark) :host {
+  --color-neutral-950: #ffffff;
+  --color-neutral-900: #f9fafb;
+  --color-neutral-800: #f3f4f6;
+  --color-neutral-700: #e5e7eb;
+  --color-neutral-600: #d1d5db;
+  --color-neutral-500: #6b7280;
+  --color-neutral-400: #4b5563;
+  --color-neutral-300: #374151;
+  --color-neutral-200: #1f2937;
+  --color-neutral-100: #111827;
+  --color-neutral-50: #030712;
+}

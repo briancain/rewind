@@ -1,0 +1,73 @@
+# Canary chart values. Most config is overridden by scripts/deploy.sh from Terraform outputs.
+
+image:
+  repository: ""
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  # Must be "canary" — the IRSA trust policy binds the role to
+  # system:serviceaccount:rewind:canary (see infra/modules/irsa).
+  name: canary
+  roleArn: ""
+
+# Kubernetes Secret holding the persistent owner/viewer credentials, with keys named exactly as the
+# canary's env vars: CANARY_OWNER_EMAIL / CANARY_OWNER_PASSWORD / CANARY_VIEWER_EMAIL /
+# CANARY_VIEWER_PASSWORD. Created out-of-band by `scripts/canary.sh setup` — never in git or
+# Terraform state. Injected via envFrom; marked optional so the pod still starts (and reports a
+# clean "preconditions failed") if setup hasn't run yet, rather than a kubelet config error.
+credentialsSecret: canary-credentials
+
+# Shared canary configuration (env vars). Cloud values; deploy.sh overrides the blanks.
+config:
+  domain: ""        # CANARY_DOMAIN -> https://{service}.{domain}
+  region: us-west-2
+  cdnBase: ""       # CANARY_CDN_BASE for the seeded video's manifest_url
+  tablePrefix: ""
+  videoBucket: ""
+  rawBucket: ""
+  searchTerm: "video"
+  searchExpectHit: "false" # assert 200 + valid shape; flip to "true" once a known seed term exists
+  verifyCascade: "true"    # the deep tier asserts the cascade reclaimed everything
+  emitMetrics: "true"      # emit the Rewind/Canary CloudWatch metric
+
+# One CronJob per tier. shallow = cheap read-only hourly liveness; deep = daily full journey + cascade
+# verify. suspend is PER TIER:
+#   - shallow runs on schedule (read-only, low cost) — enabled.
+#   - deep stays SUSPENDED until explicitly vetted — it does a mutating upload + MediaConvert run, so
+#     it's gated to avoid cost/alarm noise. On-demand runs (`scripts/canary.sh deep`) still work.
+#
+# Schedules are STAGGERED PER REGION so multi-region canaries never fire at the same time. Kubernetes
+# CronJobs have no native jitter/randomized-start field (kubernetes/kubernetes#91652 — open since
+# 2020), so we offset deterministically by region via scheduleByRegion. config.region (set by
+# deploy.sh) selects the entry; `schedule` is the fallback for any region not listed / single-region.
+jobs:
+  shallow:
+    tier: shallow
+    suspend: false
+    schedule: "0 * * * *" # fallback (single-region)
+    scheduleByRegion:
+      us-west-2: "0 * * * *"  # top of the hour
+      us-east-2: "30 * * * *" # half past — decorrelated from us-west-2
+  deep:
+    tier: deep
+    suspend: true
+    schedule: "17 6 * * *" # fallback (single-region)
+    scheduleByRegion:
+      us-west-2: "17 6 * * *"  # 06:17 UTC
+      us-east-2: "17 18 * * *" # 18:17 UTC — 12h offset, never overlaps us-west-2
+
+concurrencyPolicy: Forbid
+startingDeadlineSeconds: 120
+successfulJobsHistoryLimit: 3
+failedJobsHistoryLimit: 3
+backoffLimit: 1
+ttlSecondsAfterFinished: 86400
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi

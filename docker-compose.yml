@@ -1,0 +1,148 @@
+services:
+  # --- Dependencies ---
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    ports:
+      - "8000:8000"
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb"]
+
+  localstack:
+    image: localstack/localstack:4.4
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,sqs
+      - GATEWAY_LISTEN=0.0.0.0:4566
+
+  opensearch:
+    image: opensearchproject/opensearch:2
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=Admin_1234
+
+  # --- Services ---
+  identity:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE_NAME: identity
+    ports:
+      - "8080:3000"
+    environment:
+      - PORT=3000
+      - DYNAMODB_ENDPOINT=http://dynamodb-local:8000
+      - DISABLE_SES=1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-west-2
+    depends_on:
+      - dynamodb-local
+
+  video-catalog:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE_NAME: video-catalog
+    ports:
+      - "8081:3000"
+    environment:
+      - PORT=3000
+      - DYNAMODB_ENDPOINT=http://dynamodb-local:8000
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-west-2
+    depends_on:
+      - dynamodb-local
+
+  upload:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE_NAME: upload
+    ports:
+      - "8082:3000"
+    environment:
+      - PORT=3000
+      - DYNAMODB_ENDPOINT=http://dynamodb-local:8000
+      - S3_ENDPOINT=http://localstack:4566
+      - SQS_ENDPOINT=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-west-2
+    depends_on:
+      - dynamodb-local
+      - localstack
+
+  streaming:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE_NAME: streaming
+    ports:
+      - "8083:3000"
+    environment:
+      - PORT=3000
+      - DYNAMODB_ENDPOINT=http://dynamodb-local:8000
+      - S3_ENDPOINT=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-west-2
+    depends_on:
+      - dynamodb-local
+      - localstack
+
+  social:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE_NAME: social
+    ports:
+      - "8084:3000"
+    environment:
+      - PORT=3000
+      - DYNAMODB_ENDPOINT=http://dynamodb-local:8000
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-west-2
+    depends_on:
+      - dynamodb-local
+
+  search:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE_NAME: search
+    ports:
+      - "8085:3000"
+    environment:
+      - PORT=3000
+      - OPENSEARCH_ENDPOINT=http://opensearch:9200
+    depends_on:
+      - opensearch
+
+  transcode:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE_NAME: transcode
+    environment:
+      - PORT=3000
+      - DYNAMODB_ENDPOINT=http://dynamodb-local:8000
+      - SQS_ENDPOINT=http://localstack:4566
+      - DISABLE_MEDIACONVERT=1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-west-2
+    depends_on:
+      - dynamodb-local
+      - localstack

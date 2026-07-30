@@ -1,0 +1,15 @@
+container:
+  port: 3000
+
+replicaCount: 2
+
+health:
+  path: /api/health
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

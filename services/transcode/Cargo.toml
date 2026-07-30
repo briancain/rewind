@@ -1,0 +1,25 @@
+[package]
+name = "transcode"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+shared = { path = "../shared" }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-dynamodb = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+aws-sdk-sqs = { workspace = true }
+aws-sdk-mediaconvert = { workspace = true }
+aws-sdk-cloudwatch = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true }
+uuid = { workspace = true }
+serde_json = { workspace = true }

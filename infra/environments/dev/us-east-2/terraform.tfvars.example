@@ -1,0 +1,8 @@
+# infra/environments/dev/us-east-2 — copy to terraform.tfvars and set your own values
+# (terraform.tfvars is gitignored). Both are account-specific.
+
+# IAM role ARN granted EKS cluster-admin access (your account's admin/SSO role).
+admin_role_arn = "arn:aws:iam::111122223333:role/Admin"
+
+# Email subscribed to the SNS alarm topic — receives CloudWatch alarm notifications.
+alert_email = "you@example.com"

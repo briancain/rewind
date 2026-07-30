@@ -1,0 +1,6 @@
+# Single cleanup worker (a reaper). FIFO MessageGroupId=video_id keeps per-video ordering; if the
+# one pod restarts, messages wait in SQS and are processed when it returns.
+replicaCount: 1
+
+container:
+  port: 3000

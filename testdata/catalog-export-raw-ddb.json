@@ -1,0 +1,237 @@
+{
+    "Items": [
+        {
+            "created_at": {
+                "S": "2026-06-03T20:57:04.752265371+00:00"
+            },
+            "video_id": {
+                "S": "ae3ff512-d5ee-40bf-81a7-8381b2d0388e"
+            },
+            "status": {
+                "S": "published"
+            },
+            "visibility": {
+                "S": "public"
+            },
+            "duration_seconds": {
+                "N": "714.2"
+            },
+            "genre": {
+                "S": "General"
+            },
+            "updated_at": {
+                "S": "2026-06-03T21:14:34.259719908+00:00"
+            },
+            "thumbnail_url": {
+                "S": "thumbnails/ae3ff512-d5ee-40bf-81a7-8381b2d0388e/thumb.jpg"
+            },
+            "channel_id": {
+                "S": "6281cb7c-006f-416a-9d5c-9286b3ef28a7"
+            },
+            "description": {
+                "S": "From 1968. John H. Whitney explains the graphic art potential of the computer and the methods and philosophy involved in his computer film making."
+            },
+            "s3_key": {
+                "S": "videos/ae3ff512-d5ee-40bf-81a7-8381b2d0388e/video.mp4"
+            },
+            "tags": {
+                "L": [
+                    {
+                        "S": "computers"
+                    },
+                    {
+                        "S": "graphics"
+                    }
+                ]
+            },
+            "title": {
+                "S": "Experiments in motion graphics"
+            }
+        },
+        {
+            "created_at": {
+                "S": "2026-06-12T15:43:30.211743799+00:00"
+            },
+            "video_id": {
+                "S": "27e22ae7-22e7-4bfd-9db5-0f59227a029d"
+            },
+            "status": {
+                "S": "published"
+            },
+            "manifest_url": {
+                "S": "https://cdn.watch.example.com/hls/27e22ae7-22e7-4bfd-9db5-0f59227a029d/Rick_Astley_Never_Gonna_Give_You_Up.m3u8"
+            },
+            "visibility": {
+                "S": "public"
+            },
+            "duration_seconds": {
+                "N": "212.6"
+            },
+            "genre": {
+                "S": "General"
+            },
+            "updated_at": {
+                "S": "2026-06-12T15:45:44.975332372+00:00"
+            },
+            "thumbnail_url": {
+                "S": "thumbnails/27e22ae7-22e7-4bfd-9db5-0f59227a029d/Rick_Astley_Never_Gonna_Give_You_Upthumb.0000001.jpg"
+            },
+            "channel_id": {
+                "S": "6281cb7c-006f-416a-9d5c-9286b3ef28a7"
+            },
+            "description": {
+                "S": "THE GOAT"
+            },
+            "s3_key": {
+                "S": "mp4/27e22ae7-22e7-4bfd-9db5-0f59227a029d/Rick_Astley_Never_Gonna_Give_You_Upvideo.mp4"
+            },
+            "tags": {
+                "L": []
+            },
+            "title": {
+                "S": "THE GOAT"
+            }
+        },
+        {
+            "created_at": {
+                "S": "2026-06-03T17:19:41.607489649+00:00"
+            },
+            "video_id": {
+                "S": "b210a9a9-9f3d-4084-bbbf-e7b2d71c4354"
+            },
+            "status": {
+                "S": "published"
+            },
+            "visibility": {
+                "S": "public"
+            },
+            "duration_seconds": {
+                "N": "212.6"
+            },
+            "genre": {
+                "S": "General"
+            },
+            "updated_at": {
+                "S": "2026-06-03T21:05:48.476601867+00:00"
+            },
+            "thumbnail_url": {
+                "S": "thumbnails/b210a9a9-9f3d-4084-bbbf-e7b2d71c4354/thumb.jpg"
+            },
+            "channel_id": {
+                "S": "6281cb7c-006f-416a-9d5c-9286b3ef28a7"
+            },
+            "description": {
+                "S": "The GOAT"
+            },
+            "s3_key": {
+                "S": "videos/b210a9a9-9f3d-4084-bbbf-e7b2d71c4354/video.mp4"
+            },
+            "tags": {
+                "L": [
+                    {
+                        "S": "music"
+                    },
+                    {
+                        "S": "rickroll"
+                    }
+                ]
+            },
+            "title": {
+                "S": "Rick Astley - Never Gonna Give You Up"
+            }
+        },
+        {
+            "updated_at": {
+                "S": "2026-06-03T17:26:50.186925648+00:00"
+            },
+            "created_at": {
+                "S": "2026-06-03T17:26:40.323194812+00:00"
+            },
+            "thumbnail_url": {
+                "S": "thumbnails/aa938f69-b181-4406-9c34-13dd1e9b453b/thumb.jpg"
+            },
+            "video_id": {
+                "S": "aa938f69-b181-4406-9c34-13dd1e9b453b"
+            },
+            "channel_id": {
+                "S": "6281cb7c-006f-416a-9d5c-9286b3ef28a7"
+            },
+            "status": {
+                "S": "published"
+            },
+            "duration_seconds": {
+                "N": "61.1"
+            },
+            "description": {
+                "S": "Obey."
+            },
+            "genre": {
+                "S": "General"
+            },
+            "s3_key": {
+                "S": "videos/aa938f69-b181-4406-9c34-13dd1e9b453b/video.mp4"
+            },
+            "tags": {
+                "L": [
+                    {
+                        "S": "apple"
+                    },
+                    {
+                        "S": "commercial"
+                    }
+                ]
+            },
+            "title": {
+                "S": "Apple - 1984"
+            }
+        },
+        {
+            "updated_at": {
+                "S": "2026-06-03T20:19:21.619587447+00:00"
+            },
+            "created_at": {
+                "S": "2026-06-03T17:49:46.879470165+00:00"
+            },
+            "thumbnail_url": {
+                "S": "thumbnails/497d18fe-91e5-460f-85b4-33525c0578f7/thumb.jpg"
+            },
+            "video_id": {
+                "S": "497d18fe-91e5-460f-85b4-33525c0578f7"
+            },
+            "channel_id": {
+                "S": "6281cb7c-006f-416a-9d5c-9286b3ef28a7"
+            },
+            "status": {
+                "S": "published"
+            },
+            "duration_seconds": {
+                "N": "1576.7"
+            },
+            "description": {
+                "S": "1990s found footage"
+            },
+            "genre": {
+                "S": "General"
+            },
+            "s3_key": {
+                "S": "videos/497d18fe-91e5-460f-85b4-33525c0578f7/video.mp4"
+            },
+            "tags": {
+                "L": [
+                    {
+                        "S": "90s"
+                    },
+                    {
+                        "S": "hackers"
+                    }
+                ]
+            },
+            "title": {
+                "S": "The Internet Cafe: Hackers 101"
+            }
+        }
+    ],
+    "Count": 5,
+    "ScannedCount": 5,
+    "ConsumedCapacity": null
+}

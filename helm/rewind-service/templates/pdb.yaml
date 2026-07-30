@@ -1,0 +1,20 @@
+{{- if not .Values.cronjob.enabled }}
+# Per-service PodDisruptionBudget so a voluntary disruption (node drain on Karpenter
+# drift/consolidation, or a rollout) can't evict all replicas of this service at once. With
+# maxUnavailable=1, Karpenter must reschedule one replica at a time — provisioning replacement
+# capacity and waiting for the new pod to pass the ALB health check before evicting the next. This
+# (together with the real /health target-group checks) is what keeps a node rotation graceful instead
+# of throwing region-wide 503s. maxUnavailable (not minAvailable) is used so single-replica releases
+# can still be drained rather than blocking node disruptions forever.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app: {{ .Release.Name }}
+spec:
+  maxUnavailable: {{ .Values.pdb.maxUnavailable }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+{{- end }}

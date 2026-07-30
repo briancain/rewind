@@ -1,0 +1,32 @@
+# Cascade-cleanup reconciler.
+#
+# A separate helm release off the shared rewind-service chart, running the DELETE-CLEANUP image as a
+# CronJob (`delete-cleanup reconcile`) — NOT a Deployment. Each tick scans the videos table for
+# `deleted` tombstones whose dependent data was never reclaimed (a failed videos-to-cleanup Pipe or a
+# partial cleanup — neither caught by the DLQ alarm) and emits the Rewind/Deletion
+# UnreclaimedDeletions metric, which the delete-cleanup-unreclaimed alarm watches.
+# DETECT + ALARM only — no re-cleanup (deferred), so the IRSA role is read-only.
+#
+# Deployed by scripts/deploy.sh (image.repository/tag = the delete-cleanup ECR repo + tag,
+# serviceAccount.roleArn = service_role_arns["delete-cleanup-reconcile"], and env injected at deploy
+# time). DELETION_RECONCILE_THRESHOLD_MINS / schedule are tunable here.
+
+cronjob:
+  enabled: true
+  schedule: "0 * * * *"   # hourly
+  args: ["reconcile"]
+  concurrencyPolicy: Forbid
+  restartPolicy: Never
+  backoffLimit: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# TABLE_PREFIX, AWS_DEFAULT_REGION, VIDEO_BUCKET, RAW_BUCKET, and DELETION_RECONCILE_THRESHOLD_MINS
+# are set at deploy time (scripts/deploy.sh) so they match the region's delete-cleanup deployment.
+env: []

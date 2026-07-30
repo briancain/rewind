@@ -1,0 +1,5 @@
+# infra/global — copy to terraform.tfvars and set your own value (terraform.tfvars is gitignored).
+#
+# The root domain for the platform. The hosted zone + wildcard ACM cert are created for this name,
+# and every other stack reads it from this stack's `domain` output (so it's set in ONE place).
+domain = "watch.example.com"

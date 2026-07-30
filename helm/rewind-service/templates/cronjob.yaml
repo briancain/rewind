@@ -1,0 +1,53 @@
+{{- if .Values.cronjob.enabled }}
+# Rendered instead of the Deployment + Service when cronjob.enabled is true. Used by the
+# transcode-reconcile sweep: the transcode image invoked with args ["reconcile"], on a schedule,
+# to detect + alarm on stranded `processing` videos.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app: {{ .Release.Name }}
+spec:
+  schedule: {{ .Values.cronjob.schedule | quote }}
+  # Forbid overlapping runs so a slow sweep can't double up with the next tick.
+  concurrencyPolicy: {{ .Values.cronjob.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ .Values.cronjob.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ .Values.cronjob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.cronjob.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.cronjob.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            app: {{ .Release.Name }}
+        spec:
+          restartPolicy: {{ .Values.cronjob.restartPolicy }}
+          {{- if .Values.serviceAccount.roleArn }}
+          serviceAccountName: {{ .Release.Name }}
+          {{- end }}
+          nodeSelector:
+            kubernetes.io/arch: arm64
+          containers:
+            - name: {{ .Release.Name }}
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              # The image has no ENTRYPOINT (CMD ["service"]), so we must name the binary as the
+              # command and pass the subcommand as args — otherwise k8s `args` replaces CMD and tries
+              # to exec the subcommand itself. Mirrors scripts/reindex.sh (`["service","reindex"]`).
+              command: ["service"]
+              {{- if .Values.cronjob.args }}
+              args:
+                {{- range .Values.cronjob.args }}
+                - {{ . | quote }}
+                {{- end }}
+              {{- end }}
+              env:
+                {{- range .Values.env }}
+                - name: {{ .name }}
+                  value: "{{ .value }}"
+                {{- end }}
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+{{- end }}

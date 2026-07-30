@@ -1,0 +1,14 @@
+container:
+  port: 8086
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+env:
+  - name: DISABLE_MEDIACONVERT
+    value: "1"

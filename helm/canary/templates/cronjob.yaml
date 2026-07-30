@@ -1,0 +1,75 @@
+{{- /*
+One CronJob per entry in .Values.jobs (shallow + deep). All tiers share the same image, SA, env and
+credentials Secret; they differ only in schedule and the tier arg passed to the binary (the CMD is
+`service`, so args = [tier] runs e.g. `service deep`). Region-parameterized via config so the same
+image validates any region (and, later, failover).
+*/ -}}
+{{- range $name, $job := .Values.jobs }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: canary-{{ $name }}
+  labels:
+    app: canary
+    tier: {{ $job.tier }}
+spec:
+  schedule: {{ (get ($job.scheduleByRegion | default dict) $.Values.config.region | default $job.schedule) | quote }}
+  suspend: {{ $job.suspend }}
+  concurrencyPolicy: {{ $.Values.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $.Values.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $.Values.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $.Values.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $.Values.backoffLimit }}
+      ttlSecondsAfterFinished: {{ $.Values.ttlSecondsAfterFinished }}
+      template:
+        metadata:
+          labels:
+            app: canary
+            tier: {{ $job.tier }}
+        spec:
+          serviceAccountName: {{ $.Values.serviceAccount.name }}
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/arch: arm64
+          containers:
+            - name: canary
+              image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
+              imagePullPolicy: {{ $.Values.image.pullPolicy }}
+              # The image has CMD ["service"] and no ENTRYPOINT, so we set the full command (a bare
+              # `args` would replace CMD and try to exec the tier name). Matches scripts/reindex.sh.
+              command: ["service", {{ $job.tier | quote }}]
+              envFrom:
+                # owner/viewer credentials (CANARY_OWNER_*/CANARY_VIEWER_*). Optional so a missing
+                # Secret (setup not yet run) yields a clean preconditions failure, not a kubelet error.
+                - secretRef:
+                    name: {{ $.Values.credentialsSecret }}
+                    optional: true
+              env:
+                - name: CANARY_DOMAIN
+                  value: {{ $.Values.config.domain | quote }}
+                - name: CANARY_REGION
+                  value: {{ $.Values.config.region | quote }}
+                - name: AWS_DEFAULT_REGION
+                  value: {{ $.Values.config.region | quote }}
+                - name: CANARY_CDN_BASE
+                  value: {{ $.Values.config.cdnBase | quote }}
+                - name: TABLE_PREFIX
+                  value: {{ $.Values.config.tablePrefix | quote }}
+                - name: VIDEO_BUCKET
+                  value: {{ $.Values.config.videoBucket | quote }}
+                - name: RAW_BUCKET
+                  value: {{ $.Values.config.rawBucket | quote }}
+                - name: CANARY_SEARCH_TERM
+                  value: {{ $.Values.config.searchTerm | quote }}
+                - name: CANARY_SEARCH_EXPECT_HIT
+                  value: {{ $.Values.config.searchExpectHit | quote }}
+                - name: CANARY_VERIFY_CASCADE
+                  value: {{ $.Values.config.verifyCascade | quote }}
+                - name: CANARY_EMIT_METRICS
+                  value: {{ $.Values.config.emitMetrics | quote }}
+              resources:
+                {{- toYaml $.Values.resources | nindent 16 }}
+{{- end }}

@@ -1,0 +1,44 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Node / Next.js
+node_modules/
+frontend/.next/
+frontend/out/
+.env*.local
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Docker / Finch
+.docker/
+
+# OS
+Thumbs.db
+
+# Test / Coverage
+coverage/
+*.lcov
+tarpaulin-report.html

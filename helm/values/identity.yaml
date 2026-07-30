@@ -1,0 +1,6 @@
+container:
+  port: 8080
+
+env:
+  - name: DISABLE_SES
+    value: "1"

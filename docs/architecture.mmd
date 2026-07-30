@@ -1,0 +1,167 @@
+%%{init: {"theme":"base","themeVariables":{"fontSize":"15px","fontFamily":"Helvetica, Arial, sans-serif"},"flowchart":{"curve":"basis","nodeSpacing":40,"rankSpacing":60}}}%%
+flowchart TB
+    classDef client   fill:#E8EDF3,stroke:#5B7A9D,color:#1a2b3c,stroke-width:2px;
+    classDef edge     fill:#FFE9CC,stroke:#D9822B,color:#5c3a12;
+    classDef svc      fill:#DCEDF9,stroke:#2E86C1,color:#12354d;
+    classDef worker   fill:#E7E0F5,stroke:#7D5BA6,color:#2f1f4d;
+    classDef cron     fill:#F3E1EC,stroke:#B14D8E,color:#4d1f3a;
+    classDef queue    fill:#FDECEC,stroke:#D64545,color:#5c1a1a;
+    classDef pipe     fill:#FBF2D5,stroke:#C9A227,color:#4d3d0a;
+    classDef store    fill:#DFF3E4,stroke:#2E9E5B,color:#12401f;
+    classDef managed  fill:#FBE4D3,stroke:#D9822B,color:#5c3312;
+    classDef global   fill:#E2F0F0,stroke:#1F9E9E,color:#0d3d3d;
+    classDef obs      fill:#ECECEC,stroke:#808080,color:#333;
+
+    %% ======================================================================
+    %% TRAFFIC ENTERS AT THE TOP AND FLOWS DOWN:
+    %%   Client → Route 53 / CloudFront → WAF → ALB → EKS → data
+    %% ======================================================================
+
+    %% ---------- TIER 0: CLIENT ----------
+    User(["👤 Browser / Client<br/>watch app · API calls · HLS playback"]):::client
+
+    %% ---------- TIER 1: GLOBAL EDGE / ROUTING ----------
+    subgraph EDGE["🌐 Global edge &amp; routing (region-agnostic)"]
+        direction LR
+        R53["Route 53 — latency records + per-region health checks<br/>watch. · identity. · catalog. · upload. · streaming. ·<br/>social. · search. · *. wildcard · region-pinned &lt;region&gt;.watch."]:::edge
+        CF["CloudFront &nbsp;cdn.&lt;domain&gt;<br/>origin group (uw2 primary → ue2 failover)<br/>Origin Shield · OAC · us-east-1 viewer cert"]:::edge
+    end
+
+    User -->|"HTTPS app / API<br/>(latency-routed)"| R53
+    User -->|"HLS / MP4<br/>playback"| CF
+
+    %% ======================= PRIMARY REGION =======================
+    subgraph UW2["🟦 Region us-west-2 (primary) — full detail"]
+        direction TB
+
+        %% -- Regional entry (load-balancer tier) --
+        WAF1["WAFv2 web ACL — rate-based + AWS managed groups<br/>(IP-reputation · common · known-bad-inputs)"]:::edge
+        ALB1["Regional ALB — host-based Ingress · /health target checks<br/>(AWS Load Balancer Controller)"]:::edge
+        WAF1 --> ALB1
+
+        %% -- Compute: EKS Auto Mode cluster --
+        subgraph EKS1["EKS Auto Mode cluster (Karpenter · 2-AZ spread · PDBs)"]
+            direction TB
+            subgraph REQ1["Request-serving services (Rust + Next.js frontend)"]
+                direction LR
+                FE1["frontend<br/>Next.js · hls-video"]:::svc
+                IDN1["identity<br/>auth · sessions · channels"]:::svc
+                CAT1["video-catalog<br/>metadata · feed · surf"]:::svc
+                UPL1["upload<br/>multipart presign"]:::svc
+                STR1["streaming<br/>HLS / private-MP4 presign"]:::svc
+                SOC1["social<br/>comments · reactions · stats"]:::svc
+                SRCH1["search<br/>query API + reindex Job"]:::svc
+            end
+            subgraph WRK1["Event-driven workers (SQS consumers)"]
+                direction LR
+                TJOB1["transcode<br/>job consumer"]:::worker
+                TCMP1["transcode<br/>completion consumer"]:::worker
+                SIDX1["search<br/>index consumer"]:::worker
+                DCLN1["delete-cleanup<br/>cascade worker<br/>(+ CDN invalidate)"]:::worker
+            end
+            subgraph CRON1["CronJobs"]
+                direction LR
+                TREC1["transcode<br/>reconcile"]:::cron
+                DREC1["delete-cleanup<br/>reconcile"]:::cron
+                CAN1["canary<br/>shallow · deep(suspended)<br/>blackbox → public *.domain"]:::cron
+            end
+        end
+
+        %% -- Regional data plane --
+        subgraph DATA1["Regional data plane (us-west-2)"]
+            direction TB
+            subgraph STORES1["Object &amp; search stores"]
+                direction LR
+                RAW1[("S3 raw<br/>expire 30d")]:::store
+                VID1[("S3 videos<br/>hls/ · mp4/ · thumbnails/<br/>versioned")]:::store
+                OS1[("OpenSearch<br/>single-node t3.medium.search<br/>VPC-attached · SigV4")]:::managed
+                MC1["MediaConvert<br/>HLS ABR + MP4 + thumbnail"]:::managed
+            end
+            subgraph GDATA["🗄️ DynamoDB Global Tables ×11 — in-region replica · streams on (NEW_AND_OLD_IMAGES)"]
+                direction LR
+                DDB["users · sessions · verification_tokens · invite_codes · videos ·<br/>transcode_jobs · comments · reactions · comment_reactions ·<br/>video_stats · view_history"]:::global
+            end
+            subgraph EVENTS1["Event pipeline (SQS · EventBridge · Pipes)"]
+                direction LR
+                QTJ1{{"SQS transcode<br/>+ DLQ"}}:::queue
+                EBR1["EventBridge rule<br/>MediaConvert<br/>COMPLETE/ERROR"]:::pipe
+                QTC1{{"SQS completions<br/>+ DLQ + EB-DLQ"}}:::queue
+                PSE1["EB Pipe<br/>videos → search"]:::pipe
+                QSI1{{"SQS search_index<br/>(FIFO) + DLQ"}}:::queue
+                PCL1["EB Pipe (filtered)<br/>videos → cleanup"]:::pipe
+                QDC1{{"SQS delete_cleanup<br/>(FIFO) + DLQ"}}:::queue
+            end
+        end
+    end
+
+    %% ---------- SECOND REGION (compact mirror) ----------
+    subgraph UE2["🟩 Region us-east-2 (active/active) — symmetric mirror"]
+        direction LR
+        EKS2["WAFv2 + ALB<br/>EKS: same 7 services<br/>+ 4 workers + 3 CronJobs"]:::svc
+        DATA2["Regional data plane<br/>S3 raw/videos · OpenSearch ·<br/>MediaConvert · SQS×4 · Pipes×2"]:::store
+        DDB2[("DynamoDB Global Table<br/>replicas (us-east-2)")]:::global
+    end
+
+    %% ---------- OBSERVABILITY ----------
+    subgraph OBS["📊 Observability"]
+        direction LR
+        ALM["Per-region alarms → SNS email<br/>5xx · p95 · DLQ/Pipe · replication ·<br/>stuck-transcode · unreclaimed-delete · canary"]:::obs
+        DASH["Global CloudWatch dashboard"]:::obs
+    end
+
+    %% ================= REQUEST PATH (solid, top-down) =================
+    R53 --> WAF1
+    ALB1 --> FE1 & IDN1 & CAT1 & UPL1 & STR1 & SOC1 & SRCH1
+    CF --> VID1
+
+    %% Synchronous data access
+    IDN1 --> DDB
+    CAT1 --> DDB
+    SOC1 --> DDB
+    STR1 --> DDB
+    UPL1 --> DDB
+    SRCH1 -->|query| OS1
+    STR1 -->|presign MP4| VID1
+    UPL1 -->|presign| RAW1
+
+    %% ================= ASYNC PIPELINES (dotted, secondary) =================
+    %% Upload → transcode
+    UPL1 -. enqueue .-> QTJ1
+    QTJ1 -. consume .-> TJOB1
+    TJOB1 -. submit .-> MC1
+    TJOB1 -. write .-> DDB
+    MC1 -. outputs .-> VID1
+    MC1 -. job event .-> EBR1
+    EBR1 -. route .-> QTC1
+    QTC1 -. consume .-> TCMP1
+    TCMP1 -. publish .-> DDB
+
+    %% Search index sync (off videos stream)
+    DDB -. videos stream .-> PSE1
+    PSE1 -.-> QSI1
+    QSI1 -. consume .-> SIDX1
+    SIDX1 -. upsert/delete .-> OS1
+
+    %% Cascade delete (soft-delete off videos stream)
+    DDB -. stream: soft-delete .-> PCL1
+    PCL1 -.-> QDC1
+    QDC1 -. consume .-> DCLN1
+    DCLN1 -. purge rows .-> DDB
+    DCLN1 -. delete objects .-> VID1
+    DCLN1 -.-> RAW1
+
+    %% Reconcilers
+    TREC1 -. scan .-> DDB
+    DREC1 -. scan+probe .-> DDB
+
+    %% ================= CROSS-REGION (dotted, at data tier) =================
+    R53 -. other region .-> EKS2
+    EKS2 --> DATA2
+    EKS2 --> DDB2
+    DDB <==>|Global Table replication| DDB2
+    VID1 <==>|S3 CRR + RTC 15-min, bidirectional| DATA2
+
+    %% ================= OBSERVABILITY WIRING =================
+    EKS1 -. container logs (CW addon) .-> ALM
+    DATA1 -. metrics .-> ALM
+    ALM -.-> DASH

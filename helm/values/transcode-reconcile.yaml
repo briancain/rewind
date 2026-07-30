@@ -1,0 +1,31 @@
+# Stuck-`processing` transcode reconciler.
+#
+# A separate helm release off the shared rewind-service chart, running the TRANSCODE image as a
+# CronJob (`transcode reconcile`) — NOT a Deployment. Each tick scans the videos table for jobs
+# stranded in `processing` (lost MediaConvert completion event, or a region failure) and emits the
+# Rewind/Transcode StuckTranscodes metric, which the transcode-stuck-processing alarm watches.
+# DETECT + ALARM only — no re-drive (deferred), so the IRSA role is read-only.
+#
+# Deployed by scripts/deploy.sh (image.repository/tag = the transcode ECR repo + tag,
+# serviceAccount.roleArn = service_role_arns["transcode-reconcile"], and env injected at deploy
+# time). RECONCILE_STUCK_THRESHOLD_MINS / schedule are tunable here.
+
+cronjob:
+  enabled: true
+  schedule: "0 * * * *"   # hourly
+  args: ["reconcile"]
+  concurrencyPolicy: Forbid
+  restartPolicy: Never
+  backoffLimit: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# TABLE_PREFIX, AWS_DEFAULT_REGION, and RECONCILE_STUCK_THRESHOLD_MINS are set at deploy time
+# (scripts/deploy.sh) so they match the region's transcode deployment.
+env: []

@@ -1,0 +1,64 @@
+{{- if not .Values.cronjob.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+    spec:
+      {{- if .Values.serviceAccount.roleArn }}
+      serviceAccountName: {{ .Release.Name }}
+      {{- end }}
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      # HA: required zone anti-affinity — two replicas of this service can never share an AZ, so the
+      # scheduler deterministically spreads them across AZs on every schedule and Karpenter provisions
+      # a node in another AZ to satisfy it. Stricter and more reliable than topology spread, which
+      # only balances at scheduling time and can drift across rolling updates. Trade-offs: caps a
+      # service at <= (number of AZs) replicas — fine here (3 AZs, 2 replicas); and a 2-replica
+      # rolling update briefly surges a 3rd pod into the 3rd AZ (a transient extra node, consolidated
+      # away afterwards). Single-replica releases (delete-cleanup) are unaffected.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: topology.kubernetes.io/zone
+              labelSelector:
+                matchLabels:
+                  app: {{ .Release.Name }}
+      containers:
+        - name: {{ .Release.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.container.port }}
+          env:
+            - name: PORT
+              value: "{{ .Values.container.port }}"
+            {{- range .Values.env }}
+            - name: {{ .name }}
+              value: "{{ .value }}"
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.health.path }}
+              port: {{ .Values.container.port }}
+            initialDelaySeconds: {{ .Values.health.initialDelaySeconds }}
+            periodSeconds: {{ .Values.health.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.health.path }}
+              port: {{ .Values.container.port }}
+            initialDelaySeconds: {{ .Values.health.initialDelaySeconds }}
+            periodSeconds: {{ .Values.health.periodSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}
