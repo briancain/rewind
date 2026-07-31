@@ -94,6 +94,18 @@ variable "waf_blocked_requests_threshold" {
   default     = 500
 }
 
+variable "auth_4xx_threshold" {
+  description = "4xx responses on /login + /register (sum over 5 min) above which the auth-4xx alarm fires. Above the routine wrong-password/duplicate-email baseline, so it catches a systemic break (auth outage, broken registration/invite validation, bad deploy)."
+  type        = number
+  default     = 50
+}
+
+variable "feed_4xx_threshold" {
+  description = "4xx responses on /videos/feed (sum over 5 min) above which the feed-4xx alarm fires. The public feed should almost never 4xx, so a small sustained rate signals a broken client contract."
+  type        = number
+  default     = 20
+}
+
 variable "log_group_prefix" {
   description = "CloudWatch log group for EKS application logs"
   type        = string
@@ -168,6 +180,35 @@ resource "aws_cloudwatch_log_metric_filter" "upload_failing" {
 
   metric_transformation {
     name      = "upload-failures"
+    namespace = "${var.name}/CustomerExperience"
+    value     = "1"
+  }
+}
+
+# Auth 4xx (login/register): only 4xx (5xx is covered by login-broken). A routine baseline exists
+# (wrong passwords, duplicate emails), so the companion alarm fires only on a surge — a systemic
+# break like an auth outage returning 401s, broken registration/invite validation, or a bad deploy.
+resource "aws_cloudwatch_log_metric_filter" "auth_4xx" {
+  name           = "${var.name}-auth-4xx"
+  log_group_name = var.log_group_prefix
+  pattern        = "{ $.kubernetes.container_name = \"identity\" && ($.log_processed.span.path = \"/login\" || $.log_processed.span.path = \"/register\") && $.log_processed.fields.status >= 400 && $.log_processed.fields.status < 500 }"
+
+  metric_transformation {
+    name      = "auth-4xx-count"
+    namespace = "${var.name}/CustomerExperience"
+    value     = "1"
+  }
+}
+
+# Feed 4xx: the public feed should almost never return a 4xx to a normal user, so any sustained rate
+# signals a broken client/contract (e.g. a bad deploy changing query params).
+resource "aws_cloudwatch_log_metric_filter" "feed_4xx" {
+  name           = "${var.name}-feed-4xx"
+  log_group_name = var.log_group_prefix
+  pattern        = "{ $.kubernetes.container_name = \"video-catalog\" && $.log_processed.span.path = \"/videos/feed\" && $.log_processed.fields.status >= 400 && $.log_processed.fields.status < 500 }"
+
+  metric_transformation {
+    name      = "feed-4xx-count"
     namespace = "${var.name}/CustomerExperience"
     value     = "1"
   }
@@ -646,6 +687,39 @@ resource "aws_cloudwatch_metric_alarm" "upload_failing" {
   statistic           = "Sum"
   threshold           = 3
   alarm_description   = "Upload failures (4xx/5xx on /uploads/*) > 3 in 5 minutes"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  treat_missing_data  = "notBreaching"
+  tags                = var.tags
+}
+
+# Auth 4xx surge (login/register) — see the auth_4xx filter. Threshold sits above the routine
+# wrong-password/duplicate-email baseline so it fires on a systemic break, not normal user error.
+resource "aws_cloudwatch_metric_alarm" "auth_4xx_spike" {
+  alarm_name          = "${var.name}-auth-4xx-spike"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "auth-4xx-count"
+  namespace           = "${var.name}/CustomerExperience"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = var.auth_4xx_threshold
+  alarm_description   = "Auth 4xx (login/register) > ${var.auth_4xx_threshold} in 5 min — possible auth outage, broken registration/invite validation, or bad deploy"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  treat_missing_data  = "notBreaching"
+  tags                = var.tags
+}
+
+# Feed 4xx — see the feed_4xx filter. The public feed should essentially never 4xx.
+resource "aws_cloudwatch_metric_alarm" "feed_4xx_spike" {
+  alarm_name          = "${var.name}-feed-4xx-spike"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "feed-4xx-count"
+  namespace           = "${var.name}/CustomerExperience"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = var.feed_4xx_threshold
+  alarm_description   = "Feed 4xx (/videos/feed) > ${var.feed_4xx_threshold} in 5 min — broken client contract on the public feed"
   alarm_actions       = [aws_sns_topic.alerts.arn]
   treat_missing_data  = "notBreaching"
   tags                = var.tags
