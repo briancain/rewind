@@ -55,6 +55,45 @@ pub async fn generate_presigned_urls(
     Ok(urls)
 }
 
+// List uploaded parts as (part_number, etag) sorted by number, paginated (S3 caps pages at 1000;
+// a 5 GB upload at 5 MB parts hits that). Built server-side so the /complete body stays tiny.
+pub async fn list_parts(
+    s3: &S3Client,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+) -> Result<Vec<(i32, String)>, AppError> {
+    let mut parts: Vec<(i32, String)> = Vec::new();
+    let mut marker: Option<String> = None;
+
+    loop {
+        let mut req = s3.list_parts().bucket(bucket).key(key).upload_id(upload_id);
+        if let Some(m) = marker.take() {
+            req = req.part_number_marker(m);
+        }
+
+        let resp = req.send().await.map_err(AppError::internal)?;
+
+        for part in resp.parts() {
+            if let (Some(number), Some(etag)) = (part.part_number(), part.e_tag()) {
+                parts.push((number, etag.to_string()));
+            }
+        }
+
+        if resp.is_truncated() == Some(true) {
+            match resp.next_part_number_marker() {
+                Some(m) => marker = Some(m.to_string()),
+                None => break,
+            }
+        } else {
+            break;
+        }
+    }
+
+    parts.sort_by_key(|(number, _)| *number);
+    Ok(parts)
+}
+
 pub async fn complete_multipart(
     s3: &S3Client,
     bucket: &str,

@@ -64,15 +64,14 @@ pub async fn complete(
     if req.s3_key.trim().is_empty() {
         return Err(AppError::BadRequest("s3_key is required".to_string()));
     }
-    if req.parts.is_empty() {
-        return Err(AppError::BadRequest("parts must not be empty".to_string()));
-    }
 
-    let parts: Vec<(i32, String)> = req
-        .parts
-        .iter()
-        .map(|p| (p.part_number, p.etag.clone()))
-        .collect();
+    // Assemble parts from S3, not the request body (keeps the body size-independent).
+    let parts = repo::list_parts(&state.s3, &state.bucket, &req.s3_key, &req.upload_id).await?;
+    if parts.is_empty() {
+        return Err(AppError::BadRequest(
+            "no uploaded parts found for upload_id".to_string(),
+        ));
+    }
 
     repo::complete_multipart(
         &state.s3,

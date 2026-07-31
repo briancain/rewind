@@ -241,15 +241,8 @@ async fn full_upload_flow() {
         .unwrap();
 
     assert!(upload_resp.status().is_success());
-    let etag = upload_resp
-        .headers()
-        .get("etag")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
 
-    // 3. Complete
+    // 3. Complete (server assembles parts from S3 ListParts — no client etags)
     let resp = app
         .clone()
         .oneshot(
@@ -263,7 +256,6 @@ async fn full_upload_flow() {
                         "video_id": video_id,
                         "upload_id": upload_id,
                         "s3_key": s3_key,
-                        "parts": [{"part_number": 1, "etag": etag}]
                     })
                     .to_string(),
                 ))
@@ -275,6 +267,78 @@ async fn full_upload_flow() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert!(body["s3_key"].as_str().unwrap().contains(&video_id));
+}
+
+/// Multi-part upload: the server must assemble both parts via ListParts (client sends no parts).
+#[tokio::test]
+async fn multipart_upload_assembles_via_list_parts() {
+    let (app, token) = setup().await;
+    let video_id = format!("vid-{}", uuid::Uuid::new_v4());
+
+    // Two 5 MB parts (S3 requires every part except the last to be >= 5 MB).
+    let part_size = 5 * 1024 * 1024;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/uploads/initiate")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", token))
+                .body(Body::from(
+                    json!({
+                        "video_id": video_id,
+                        "filename": "video.mp4",
+                        "content_type": "video/mp4",
+                        "part_count": 2
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let upload_id = body["upload_id"].as_str().unwrap().to_string();
+    let s3_key = body["s3_key"].as_str().unwrap().to_string();
+    let urls = body["presigned_urls"].as_array().unwrap();
+    assert_eq!(urls.len(), 2);
+
+    let client = reqwest::Client::new();
+    for (i, url) in urls.iter().enumerate() {
+        let byte = b'a' + i as u8;
+        let part = client
+            .put(url.as_str().unwrap())
+            .body(vec![byte; part_size])
+            .send()
+            .await
+            .unwrap();
+        assert!(part.status().is_success());
+    }
+
+    // Complete with only the identifiers — no parts array.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/uploads/complete")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", token))
+                .body(Body::from(
+                    json!({
+                        "video_id": video_id,
+                        "upload_id": upload_id,
+                        "s3_key": s3_key,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -356,8 +420,37 @@ async fn initiate_rejects_non_video_content_type() {
 }
 
 #[tokio::test]
-async fn complete_rejects_empty_parts() {
+async fn complete_rejects_upload_with_no_parts() {
     let (app, token) = setup().await;
+    let video_id = format!("vid-{}", uuid::Uuid::new_v4());
+
+    // Initiate but upload no parts, then complete — ListParts is empty, so it must 400.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/uploads/initiate")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", token))
+                .body(Body::from(
+                    json!({
+                        "video_id": video_id,
+                        "filename": "video.mp4",
+                        "content_type": "video/mp4",
+                        "part_count": 1
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let upload_id = body["upload_id"].as_str().unwrap().to_string();
+    let s3_key = body["s3_key"].as_str().unwrap().to_string();
+
     let resp = app
         .oneshot(
             Request::builder()
@@ -367,10 +460,9 @@ async fn complete_rejects_empty_parts() {
                 .header("authorization", format!("Bearer {}", token))
                 .body(Body::from(
                     json!({
-                        "video_id": "vid-1",
-                        "upload_id": "uid-1",
-                        "s3_key": "raw/vid-1/test.mp4",
-                        "parts": []
+                        "video_id": video_id,
+                        "upload_id": upload_id,
+                        "s3_key": s3_key,
                     })
                     .to_string(),
                 ))

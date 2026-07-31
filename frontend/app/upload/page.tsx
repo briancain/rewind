@@ -39,20 +39,18 @@ export default function UploadPage() {
         body: JSON.stringify({ video_id: video.video_id, filename: file.name, content_type: file.type || "video/mp4", part_count: partCount }),
       });
 
-      // 3. Upload parts
-      const etags: string[] = [];
+      // 3. Upload parts directly to S3
       for (let i = 0; i < partCount; i++) {
         const chunk = file.slice(i * partSize, (i + 1) * partSize);
         const resp = await fetch(initRes.presigned_urls[i], { method: "PUT", body: chunk });
-        etags.push(resp.headers.get("etag") || "");
+        if (!resp.ok) throw new Error(`Part ${i + 1} upload failed (${resp.status})`);
         setProgress(Math.round(((i + 1) / partCount) * 100));
       }
 
-      // 4. Complete upload
-      const parts = etags.map((etag, i) => ({ part_number: i + 1, etag }));
+      // 4. Complete upload (server assembles parts via S3 ListParts)
       await svc("upload", "/uploads/complete", {
         method: "POST",
-        body: JSON.stringify({ video_id: video.video_id, upload_id: initRes.upload_id, s3_key: initRes.s3_key, parts }),
+        body: JSON.stringify({ video_id: video.video_id, upload_id: initRes.upload_id, s3_key: initRes.s3_key }),
       });
 
       router.push(`/watch/${video.video_id}`);

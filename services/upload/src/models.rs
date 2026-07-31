@@ -15,18 +15,13 @@ pub struct InitiateResponse {
     pub presigned_urls: Vec<String>,
 }
 
+// No parts array: the completed-parts list is assembled server-side via S3 ListParts, keeping the
+// body tiny (a large file's per-part array used to exceed the ALB WAF 8 KB body limit).
 #[derive(Debug, Deserialize)]
 pub struct CompleteRequest {
     pub video_id: String,
     pub upload_id: String,
     pub s3_key: String,
-    pub parts: Vec<CompletedPart>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct CompletedPart {
-    pub part_number: i32,
-    pub etag: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,11 +44,11 @@ mod tests {
     }
 
     #[test]
-    fn complete_request_with_parts() {
-        let json = r#"{"video_id":"v1","upload_id":"u1","s3_key":"raw/v1/test.mp4","parts":[{"part_number":1,"etag":"abc"}]}"#;
+    fn complete_request_deserializes() {
+        let json = r#"{"video_id":"v1","upload_id":"u1","s3_key":"raw/v1/test.mp4"}"#;
         let req: CompleteRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.parts.len(), 1);
-        assert_eq!(req.parts[0].part_number, 1);
-        assert_eq!(req.parts[0].etag, "abc");
+        assert_eq!(req.video_id, "v1");
+        assert_eq!(req.upload_id, "u1");
+        assert_eq!(req.s3_key, "raw/v1/test.mp4");
     }
 }
