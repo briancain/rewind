@@ -116,6 +116,12 @@ variable "service_latency_p95_threshold_ms" {
   default     = 2000
 }
 
+variable "playback_client_errors_threshold" {
+  description = "Client-side playback errors (beaconed by VideoPlayer, sum over 5 min) above which the alarm fires. Above the low baseline of one-off client/network hiccups, so it catches a systemic playback break (bad manifest, CORS, codec)."
+  type        = number
+  default     = 10
+}
+
 variable "log_group_prefix" {
   description = "CloudWatch log group for EKS application logs"
   type        = string
@@ -305,6 +311,22 @@ resource "aws_cloudwatch_log_metric_filter" "frontend_5xx" {
   metric_transformation {
     name      = "frontend-5xx-count"
     namespace = "${var.name}/Services"
+    value     = "1"
+  }
+}
+
+# Client-side playback failures beaconed by VideoPlayer to /api/playback-error (hls.js fatal /
+# MediaError). Streaming + CloudFront can all return 200s yet the browser still can't play (codec,
+# CORS, manifest parse); this is the only signal for that. The beacon logs a flat structured line
+# with a stable event marker, so (like frontend_5xx) it lands at $.log_processed.event.
+resource "aws_cloudwatch_log_metric_filter" "frontend_playback_errors" {
+  name           = "${var.name}-frontend-playback-errors"
+  log_group_name = var.log_group_prefix
+  pattern        = "{ $.kubernetes.container_name = \"frontend\" && $.log_processed.event = \"playback_error\" }"
+
+  metric_transformation {
+    name      = "playback-client-errors"
+    namespace = "${var.name}/CustomerExperience"
     value     = "1"
   }
 }
@@ -861,6 +883,24 @@ resource "aws_cloudwatch_metric_alarm" "frontend_broken" {
   statistic           = "Sum"
   threshold           = 3
   alarm_description   = "Frontend server 5xx > 3 in 5 minutes (SSR / route-handler errors)"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  treat_missing_data  = "notBreaching"
+  tags                = var.tags
+}
+
+# Client-side playback failures (from the frontend_playback_errors filter). The only signal for
+# "video won't play in the browser" when the server returned 200s everywhere. Threshold sits above
+# the low baseline of one-off client/network hiccups so it fires on a systemic break.
+resource "aws_cloudwatch_metric_alarm" "playback_client_errors" {
+  alarm_name          = "${var.name}-playback-client-errors"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "playback-client-errors"
+  namespace           = "${var.name}/CustomerExperience"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = var.playback_client_errors_threshold
+  alarm_description   = "Client-side playback errors > ${var.playback_client_errors_threshold} in 5 min — viewers can't play video even though the server returned 200s"
   alarm_actions       = [aws_sns_topic.alerts.arn]
   treat_missing_data  = "notBreaching"
   tags                = var.tags

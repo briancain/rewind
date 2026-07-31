@@ -1,4 +1,4 @@
-import { playbackState, shouldPollForReadiness } from "@/lib/video";
+import { playbackState, shouldPollForReadiness, buildPlaybackErrorBeacon } from "@/lib/video";
 
 describe("playbackState", () => {
   it("reports failed regardless of stream url", () => {
@@ -40,5 +40,33 @@ describe("shouldPollForReadiness", () => {
   it("does not poll for terminal states", () => {
     expect(shouldPollForReadiness("failed", false)).toBe(false);
     expect(shouldPollForReadiness("deleted", false)).toBe(false);
+  });
+});
+
+describe("buildPlaybackErrorBeacon", () => {
+  it("builds a beacon from a MediaError on an HLS source", () => {
+    const b = buildPlaybackErrorBeacon("vid-1", "https://cdn/hls/vid-1/x.m3u8", {
+      code: 4,
+      message: "MEDIA_ERR_SRC_NOT_SUPPORTED",
+    });
+    expect(b).toEqual({
+      video_id: "vid-1",
+      is_hls: true,
+      error_code: 4,
+      message: "MEDIA_ERR_SRC_NOT_SUPPORTED",
+    });
+  });
+
+  it("falls back for a missing video id / null error and detects a non-HLS source", () => {
+    const b = buildPlaybackErrorBeacon(undefined, "https://s3/mp4/x.mp4", null);
+    expect(b.video_id).toBe("unknown");
+    expect(b.is_hls).toBe(false);
+    expect(b.error_code).toBeNull();
+    expect(b.message).toBe("playback error");
+  });
+
+  it("truncates a long error message to 200 chars", () => {
+    const b = buildPlaybackErrorBeacon("v", "a.m3u8", { code: 3, message: "x".repeat(500) });
+    expect(b.message).toHaveLength(200);
   });
 });

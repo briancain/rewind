@@ -188,7 +188,7 @@ export default function WatchPage() {
           <p className="text-neutral-500 text-sm">This may take a few minutes. Playback will start automatically when it&apos;s ready.</p>
         </div>
       ) : (
-        <VideoPlayer streamUrl={streamUrl} posterUrl={posterUrl || undefined} onWatched={handleWatched} />
+        <VideoPlayer streamUrl={streamUrl} posterUrl={posterUrl || undefined} onWatched={handleWatched} videoId={id} />
       )}
       <h1 className="text-xl font-bold mt-4">{meta.title}</h1>
       <div className="flex items-center gap-3 mt-3">

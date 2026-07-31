@@ -30,3 +30,30 @@ export function shouldPollForReadiness(
   if (status === "failed" || status === "deleted") return false;
   return true;
 }
+
+// Client-side playback failure beacon. Even when streaming/CloudFront return 200s, playback can
+// still fail in the browser (hls.js fatal error, unsupported codec, CORS on segments, manifest
+// parse) — invisible server-side. VideoPlayer POSTs this payload to /api/playback-error on the
+// media element's `error` event; the route handler logs it so a CloudWatch filter/alarm can catch
+// a spike. Kept pure + bounded (message truncated) so it unit-tests and can't be abused to emit
+// unbounded log volume.
+export interface PlaybackErrorBeacon {
+  video_id: string;
+  is_hls: boolean;
+  error_code: number | null;
+  message: string;
+}
+
+export function buildPlaybackErrorBeacon(
+  videoId: string | undefined,
+  streamUrl: string,
+  mediaError: { code?: number; message?: string } | null | undefined
+): PlaybackErrorBeacon {
+  const raw = mediaError?.message?.trim();
+  return {
+    video_id: videoId && videoId.trim() !== "" ? videoId : "unknown",
+    is_hls: streamUrl.endsWith(".m3u8"),
+    error_code: typeof mediaError?.code === "number" ? mediaError.code : null,
+    message: (raw && raw.length > 0 ? raw : "playback error").slice(0, 200),
+  };
+}

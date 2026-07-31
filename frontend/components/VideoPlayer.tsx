@@ -21,6 +21,7 @@ import {
 } from "media-chrome/react";
 import { MediaRenditionMenu, MediaRenditionMenuButton } from "media-chrome/react/menu";
 import { attachWatchedHandler, attachEndedHandler, tryAutoplay } from "@/lib/player";
+import { buildPlaybackErrorBeacon } from "@/lib/video";
 
 interface VideoPlayerProps {
   /** HLS master manifest (.m3u8) for public/unlisted, or a presigned MP4 for private videos. */
@@ -36,6 +37,8 @@ interface VideoPlayerProps {
   autoPlay?: boolean;
   /** Fired when the video plays to its natural end — surf uses this to auto-flip to the next channel. */
   onEnded?: () => void;
+  /** Video id, sent with the client-side playback-error beacon so failures can be attributed. */
+  videoId?: string;
 }
 
 // Map Media Chrome's CSS variables to the app's dark/red theme. Unknown vars are harmless no-ops.
@@ -52,7 +55,7 @@ const THEME = {
  * control bar. Private videos arrive as a presigned MP4 and render a plain <video> (the rendition
  * menu auto-hides when there are no renditions).
  */
-export default function VideoPlayer({ streamUrl, posterUrl, onWatched, autoPlay, onEnded }: VideoPlayerProps) {
+export default function VideoPlayer({ streamUrl, posterUrl, onWatched, autoPlay, onEnded, videoId }: VideoPlayerProps) {
   const mediaRef = useRef<HTMLVideoElement | null>(null);
   const isHls = streamUrl.endsWith(".m3u8");
 
@@ -78,6 +81,30 @@ export default function VideoPlayer({ streamUrl, posterUrl, onWatched, autoPlay,
     if (!el || !autoPlay) return;
     tryAutoplay(el);
   }, [streamUrl, autoPlay]);
+
+  // Client-side playback failures (hls.js fatal / MediaError) are invisible server-side — the
+  // manifest + segments can all 200 yet the browser can't play (codec, CORS, manifest parse). Beacon
+  // them so a CloudWatch filter/alarm can catch a spike. Fire-and-forget, keepalive so it survives a
+  // navigation away from a broken video.
+  useEffect(() => {
+    const el = mediaRef.current;
+    if (!el) return;
+    const onError = () => {
+      const beacon = buildPlaybackErrorBeacon(videoId, streamUrl, el.error);
+      try {
+        fetch("/api/playback-error", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(beacon),
+          keepalive: true,
+        }).catch(() => {});
+      } catch {
+        // never let telemetry break playback UI
+      }
+    };
+    el.addEventListener("error", onError);
+    return () => el.removeEventListener("error", onError);
+  }, [streamUrl, videoId]);
 
   return (
     <MediaController
