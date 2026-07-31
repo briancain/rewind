@@ -146,6 +146,22 @@ resource "aws_cloudwatch_log_metric_filter" "streaming_thumbnail_404" {
   }
 }
 
+# Customer-facing upload failures: any 4xx/5xx response on the upload endpoints. Distinct from the
+# 5xx-only `upload-broken` alarm — client-caused S3 errors (e.g. /complete with a stale upload_id or
+# mismatched parts) now correctly return 4xx (see shared::error::from_aws), so they no longer surface
+# as 5xx; this filter catches "users can't finish uploading" regardless of 4xx-vs-5xx classification.
+resource "aws_cloudwatch_log_metric_filter" "upload_failing" {
+  name           = "${var.name}-upload-failing"
+  log_group_name = var.log_group_prefix
+  pattern        = "{ $.kubernetes.container_name = \"upload\" && $.log_processed.span.path = \"/uploads/*\" && $.log_processed.fields.status >= 400 }"
+
+  metric_transformation {
+    name      = "upload-failures"
+    namespace = "${var.name}/CustomerExperience"
+    value     = "1"
+  }
+}
+
 resource "aws_cloudwatch_log_metric_filter" "transcode_failures" {
   name           = "${var.name}-transcode-failures"
   log_group_name = var.log_group_prefix
@@ -574,6 +590,25 @@ resource "aws_cloudwatch_metric_alarm" "upload_broken" {
   statistic           = "Sum"
   threshold           = 2
   alarm_description   = "Upload service 5xx > 2 in 5 minutes"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  treat_missing_data  = "notBreaching"
+  tags                = var.tags
+}
+
+# Customer-experience view of uploads: any 4xx/5xx on the upload endpoints (via the upload_failing
+# filter). `upload-broken` above stays the pure 5xx infra-fault signal; this fires on the user-facing
+# symptom — a wave of failed uploads — including the client-caused 4xx (stale/expired upload session,
+# unassemblable parts) that `upload-broken` no longer sees now that those return 4xx instead of 500.
+resource "aws_cloudwatch_metric_alarm" "upload_failing" {
+  alarm_name          = "${var.name}-upload-failing"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "upload-failures"
+  namespace           = "${var.name}/CustomerExperience"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 3
+  alarm_description   = "Upload failures (4xx/5xx on /uploads/*) > 3 in 5 minutes"
   alarm_actions       = [aws_sns_topic.alerts.arn]
   treat_missing_data  = "notBreaching"
   tags                = var.tags
