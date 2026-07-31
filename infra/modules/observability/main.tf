@@ -83,6 +83,17 @@ variable "opensearch_domain_name" {
   type = string
 }
 
+variable "web_acl_name" {
+  description = "Name of the regional WAFv2 web ACL on the ALB (the AWS/WAFV2 WebACL dimension), for the blocked-requests alarm."
+  type        = string
+}
+
+variable "waf_blocked_requests_threshold" {
+  description = "BlockedRequests (sum over 5 min) above which the WAF-blocking alarm fires. Tuned to catch a rate-limit/managed-rule misconfig blocking real users, above the routine bot-blocking baseline."
+  type        = number
+  default     = 500
+}
+
 variable "log_group_prefix" {
   description = "CloudWatch log group for EKS application logs"
   type        = string
@@ -269,6 +280,32 @@ resource "aws_cloudwatch_metric_alarm" "alb_elb_5xx" {
 
   dimensions = {
     LoadBalancer = var.alb_arn_suffix
+  }
+
+  tags = var.tags
+}
+
+# Legitimate customers blocked at the edge by WAF are otherwise invisible: a rate-based-rule or
+# managed-rule misconfig 403s real users before they reach the ALB (no per-service 5xx, no ALB 5xx).
+# Routine bot-blocking is expected, so this fires only on a surge well above baseline (tunable).
+# Dimensions: the web ACL (WebACL + Region); Rule = ALL aggregates every rule's blocks.
+resource "aws_cloudwatch_metric_alarm" "waf_blocking_spike" {
+  alarm_name          = "${var.name}-waf-blocking-spike"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "BlockedRequests"
+  namespace           = "AWS/WAFV2"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = var.waf_blocked_requests_threshold
+  alarm_description   = "WAF blocked > ${var.waf_blocked_requests_threshold} requests in 5 min — possible rate-limit/managed-rule misconfig blocking real users"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    WebACL = var.web_acl_name
+    Region = var.region
+    Rule   = "ALL"
   }
 
   tags = var.tags

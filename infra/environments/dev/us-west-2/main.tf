@@ -252,6 +252,7 @@ module "observability" {
   region                     = var.region
   alb_arn_suffix             = data.aws_lb.ingress.arn_suffix
   alert_email                = var.alert_email
+  web_acl_name               = module.waf.web_acl_name
   sqs_queue_name             = "${local.name}-transcode-jobs"
   search_index_queue_name    = "${local.name}-search-index-events.fifo"
   search_index_dlq_name      = "${local.name}-search-index-events-dlq.fifo"
