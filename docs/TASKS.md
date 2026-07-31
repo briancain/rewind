@@ -68,15 +68,6 @@ delete.)
   per-service consumers (EventBridge bus → per-service FIFO queues + scoped IRSA). Only when real
   teams/scale justify it — multi-region does **not** require it.
 
-- [ ] **Map client-caused AWS-SDK errors to 4xx (typed-error follow-up).** Generic AWS SDK failures
-  map to `AppError::Internal` (500), which is correct for infra faults (throttle, network,
-  permissions) but wrong for the subset that are *client*-caused — most notably `upload /complete`
-  with a stale/invalid `upload_id` or mismatched part etags, where S3 returns
-  `NoSuchUpload`/`InvalidPart`. Introspect the SDK error code and map those to 400/404. Deferred
-  because it needs careful per-operation error-code matching and risks masking real infra 5xx if
-  done bluntly; `/complete`'s inputs are server-issued (from `/initiate`), so a mismatch is
-  misuse/expiry rather than a normal flow. Low priority until it shows up in practice.
-
 - [ ] **Parameterize the Terraform state backend for forks.** Every root's `backend "s3"` block
   hardcodes `bucket = "rewind-terraform-state"` / `dynamodb_table = "rewind-terraform-locks"` /
   `profile = "rewind"` / `region = "us-west-2"`, and Terraform backend blocks **can't** take

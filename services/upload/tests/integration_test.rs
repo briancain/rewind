@@ -472,3 +472,34 @@ async fn complete_rejects_upload_with_no_parts() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+/// A stale/invalid upload_id makes S3 return `NoSuchUpload`. `AppError::from_aws` must classify
+/// that as a client error (400), not a spurious 500 (the bug that stranded a draft in the live
+/// demo — the S3 code was swallowed into AppError::internal -> 500).
+#[tokio::test]
+async fn complete_with_invalid_upload_id_returns_400_not_500() {
+    let (app, token) = setup().await;
+    let video_id = format!("vid-{}", uuid::Uuid::new_v4());
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/uploads/complete")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", token))
+                .body(Body::from(
+                    json!({
+                        "video_id": video_id,
+                        "upload_id": "this-upload-id-does-not-exist",
+                        "s3_key": format!("raw/{}/video.mp4", video_id),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

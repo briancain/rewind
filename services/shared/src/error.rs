@@ -32,6 +32,54 @@ impl AppError {
     pub fn internal(e: impl std::fmt::Display) -> Self {
         AppError::Internal(e.to_string())
     }
+
+    /// Classify an AWS service **error code** into the right HTTP-mapped variant.
+    ///
+    /// This is the pure core of [`from_aws`](Self::from_aws) (no SDK types), so the mapping is
+    /// unit-testable without constructing a real `SdkError`. Client-caused S3 conditions map to a
+    /// 4xx; anything else (throttling, network, permissions, timeouts — `code` is `None` for
+    /// non-service errors) is a server fault and stays a 500. Keeping infra faults as the *only*
+    /// 500s is what keeps the per-service 5xx alarms meaningful (see DESIGN §10.10).
+    pub fn from_aws_code(context: &str, code: Option<&str>) -> AppError {
+        match code.unwrap_or("") {
+            // The upload session is stale/aborted/never-existed — the caller must re-initiate.
+            "NoSuchUpload" => AppError::BadRequest(
+                "upload session is invalid or has expired; please restart the upload".to_string(),
+            ),
+            // The assembled part set didn't match S3 (missing/mismatched etag, ordering, or a
+            // non-final part below the 5 MiB minimum) — a client/upload problem, not a server fault.
+            "InvalidPart" | "InvalidPartOrder" | "EntityTooSmall" => AppError::BadRequest(
+                "uploaded parts could not be assembled; please retry the upload".to_string(),
+            ),
+            "NoSuchKey" | "NoSuchBucket" => AppError::NotFound("upload not found".to_string()),
+            other => {
+                let detail = if other.is_empty() { "unknown" } else { other };
+                AppError::Internal(format!("{context}: {detail}"))
+            }
+        }
+    }
+
+    /// Map an AWS SDK error to an [`AppError`], logging the underlying service code and the full
+    /// error context. Use this (rather than [`internal`](Self::internal)) at S3/AWS call sites where
+    /// a client-caused failure should surface as a 4xx instead of a spurious 500 — most notably the
+    /// upload `/complete` path, where S3 returns `NoSuchUpload`/`InvalidPart` for a stale or
+    /// malformed multipart upload. The code is logged so the failure is diagnosable (an SDK
+    /// `SdkError`'s bare `Display` is only the useless string `"service error"`).
+    pub fn from_aws<E, R>(context: &str, err: aws_sdk_s3::error::SdkError<E, R>) -> AppError
+    where
+        E: aws_smithy_types::error::metadata::ProvideErrorMetadata + std::error::Error + 'static,
+        R: std::fmt::Debug,
+    {
+        use aws_smithy_types::error::metadata::ProvideErrorMetadata;
+        let code = err.code().map(str::to_string);
+        tracing::error!(
+            context = context,
+            aws_error_code = code.as_deref().unwrap_or("none"),
+            error = %aws_smithy_types::error::display::DisplayErrorContext(&err),
+            "aws sdk call failed"
+        );
+        AppError::from_aws_code(context, code.as_deref())
+    }
 }
 
 // `?` ergonomics for the two SDKs every repo touches. Both map to `Internal` (a failed AWS call is
@@ -126,5 +174,62 @@ mod tests {
     fn internal_constructor_stringifies() {
         let e = AppError::internal("disk on fire");
         assert!(matches!(e, AppError::Internal(m) if m == "disk on fire"));
+    }
+
+    #[test]
+    fn from_aws_code_maps_client_caused_multipart_errors_to_400() {
+        for code in [
+            "NoSuchUpload",
+            "InvalidPart",
+            "InvalidPartOrder",
+            "EntityTooSmall",
+        ] {
+            let e = AppError::from_aws_code("complete_multipart_upload", Some(code));
+            assert_eq!(
+                e.into_response().status(),
+                StatusCode::BAD_REQUEST,
+                "S3 code {code} should map to 400"
+            );
+        }
+    }
+
+    #[test]
+    fn from_aws_code_maps_missing_key_or_bucket_to_404() {
+        for code in ["NoSuchKey", "NoSuchBucket"] {
+            let e = AppError::from_aws_code("list_parts", Some(code));
+            assert_eq!(e.into_response().status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[test]
+    fn from_aws_code_maps_infra_and_unknown_codes_to_500() {
+        // Throttling / permissions / network are server-side faults and must stay 500 so the
+        // per-service 5xx alarms keep meaning "unexpected fault".
+        for code in [
+            Some("ThrottlingException"),
+            Some("AccessDenied"),
+            Some("SlowDown"),
+            Some("InternalError"),
+            None, // non-service error (timeout / dispatch failure) has no code
+        ] {
+            let e = AppError::from_aws_code("complete_multipart_upload", code);
+            assert_eq!(
+                e.into_response().status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "code {code:?} should map to 500"
+            );
+        }
+    }
+
+    #[test]
+    fn from_aws_code_internal_message_includes_context_and_code() {
+        assert_eq!(
+            AppError::from_aws_code("list_parts", Some("Throttling")).to_string(),
+            "internal error: list_parts: Throttling"
+        );
+        assert_eq!(
+            AppError::from_aws_code("list_parts", None).to_string(),
+            "internal error: list_parts: unknown"
+        );
     }
 }

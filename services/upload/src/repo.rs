@@ -19,7 +19,7 @@ pub async fn initiate_multipart(
         .content_type(content_type)
         .send()
         .await
-        .map_err(AppError::internal)?;
+        .map_err(|e| AppError::from_aws("create_multipart_upload", e))?;
 
     resp.upload_id()
         .map(|s| s.to_string())
@@ -47,7 +47,7 @@ pub async fn generate_presigned_urls(
             .part_number(part as i32)
             .presigned(presign_config)
             .await
-            .map_err(AppError::internal)?;
+            .map_err(|e| AppError::from_aws("presign_upload_part", e))?;
 
         urls.push(url.uri().to_string());
     }
@@ -72,7 +72,10 @@ pub async fn list_parts(
             req = req.part_number_marker(m);
         }
 
-        let resp = req.send().await.map_err(AppError::internal)?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::from_aws("list_parts", e))?;
 
         for part in resp.parts() {
             if let (Some(number), Some(etag)) = (part.part_number(), part.e_tag()) {
@@ -122,7 +125,7 @@ pub async fn complete_multipart(
         .multipart_upload(upload)
         .send()
         .await
-        .map_err(AppError::internal)?;
+        .map_err(|e| AppError::from_aws("complete_multipart_upload", e))?;
 
     Ok(())
 }
