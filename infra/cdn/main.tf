@@ -145,6 +145,10 @@ locals {
   cdn_domain = "cdn.${local.domain}"
   zone_id    = data.terraform_remote_state.global.outputs.hosted_zone_id
 
+  # Alert email for the global (us-east-1) CloudFront / Route 53 alarms — reused from the primary
+  # env's tfvars via remote state so there's a single source of truth for the address.
+  alert_email = data.terraform_remote_state.regional_usw2.outputs.alert_email
+
   primary_bucket_id            = data.terraform_remote_state.regional_usw2.outputs.videos_bucket_id
   primary_bucket_arn           = data.terraform_remote_state.regional_usw2.outputs.videos_bucket_arn
   primary_bucket_regional_fqdn = data.terraform_remote_state.regional_usw2.outputs.videos_bucket_regional_domain_name
@@ -358,6 +362,81 @@ resource "aws_route53_record" "cdn" {
     name                   = aws_cloudfront_distribution.videos.domain_name
     zone_id                = aws_cloudfront_distribution.videos.hosted_zone_id
     evaluate_target_health = false
+  }
+}
+
+# --- Alerting for the global content CDN (CloudFront metrics are emitted only in us-east-1) ---
+# CloudFront metrics are GLOBAL, published only in us-east-1, so their alarms — and the SNS topic they
+# notify — must live in us-east-1 (the per-region observability topics can't be targeted from a
+# us-east-1 alarm). This topic reuses the env's alert email.
+# NOTE: applying this creates a NEW SNS email subscription — you must click the confirmation email
+# once before alerts deliver. (This same topic is reused by the Route 53 health-check alarms.)
+resource "aws_sns_topic" "global_alerts" {
+  provider = aws.us_east_1
+  name     = "rewind-${var.environment}-global-alerts"
+}
+
+resource "aws_sns_topic_subscription" "global_alerts_email" {
+  provider  = aws.us_east_1
+  topic_arn = aws_sns_topic.global_alerts.arn
+  protocol  = "email"
+  endpoint  = local.alert_email
+}
+
+variable "cloudfront_5xx_error_rate_threshold" {
+  description = "CloudFront 5xxErrorRate (%) over 5 min above which the alarm fires. Edge/origin 5xx breaks playback for viewers even though streaming returned a 200 manifest URL."
+  type        = number
+  default     = 5
+}
+
+variable "cloudfront_total_error_rate_threshold" {
+  description = "CloudFront TotalErrorRate (%, 4xx+5xx) over 5 min above which the alarm fires. Higher than the 5xx threshold since some 4xx (404s during origin-group failover) are expected."
+  type        = number
+  default     = 25
+}
+
+# The single biggest playback blind spot: video bytes (HLS/MP4/thumbnails) reach viewers via this
+# distribution, not the ALB, so an edge/origin 5xx is invisible to every ALB/per-service alarm.
+# 5xxErrorRate + TotalErrorRate are default (free) CloudFront metrics; dimension Region = "Global".
+# (OriginLatency would require the paid additional-metrics monitoring subscription — omitted, matching
+# the project's cost stance on paid CloudWatch/WAF features.)
+resource "aws_cloudwatch_metric_alarm" "cloudfront_5xx" {
+  provider            = aws.us_east_1
+  alarm_name          = "rewind-${var.environment}-cdn-5xx-error-rate"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "5xxErrorRate"
+  namespace           = "AWS/CloudFront"
+  period              = 300
+  statistic           = "Average"
+  threshold           = var.cloudfront_5xx_error_rate_threshold
+  alarm_description   = "CloudFront 5xx error rate > ${var.cloudfront_5xx_error_rate_threshold}% — video delivery (HLS/MP4/thumbnails) is failing at the edge/origin"
+  alarm_actions       = [aws_sns_topic.global_alerts.arn]
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    DistributionId = aws_cloudfront_distribution.videos.id
+    Region         = "Global"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "cloudfront_total_error" {
+  provider            = aws.us_east_1
+  alarm_name          = "rewind-${var.environment}-cdn-total-error-rate"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "TotalErrorRate"
+  namespace           = "AWS/CloudFront"
+  period              = 300
+  statistic           = "Average"
+  threshold           = var.cloudfront_total_error_rate_threshold
+  alarm_description   = "CloudFront total error rate > ${var.cloudfront_total_error_rate_threshold}% (4xx+5xx) — broad content-delivery failure"
+  alarm_actions       = [aws_sns_topic.global_alerts.arn]
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    DistributionId = aws_cloudfront_distribution.videos.id
+    Region         = "Global"
   }
 }
 

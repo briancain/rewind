@@ -92,3 +92,9 @@ output "transcode_completions_queue_url" {
 output "alb_arn_suffix" {
   value = data.aws_lb.ingress.arn_suffix
 }
+
+# Consumed by the global infra/cdn stack (via remote state) so its us-east-1 SNS topic for the
+# global CloudFront / Route 53 health-check alarms reuses this env's alert email (single source).
+output "alert_email" {
+  value = var.alert_email
+}
