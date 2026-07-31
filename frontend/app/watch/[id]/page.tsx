@@ -6,6 +6,7 @@ import Link from "next/link";
 import { svc } from "@/lib/api";
 import { useAuth, useRequireAuth } from "@/lib/auth";
 import { timeAgo } from "@/lib/format";
+import { playbackState, shouldPollForReadiness } from "@/lib/video";
 
 // Client-only: the player loads Media Chrome + hls-video-element web components, which register
 // custom elements on import and must not execute during SSR.
@@ -72,6 +73,38 @@ export default function WatchPage() {
       .catch(() => {});
   }, [id]);
 
+  // While the video is still transcoding, streaming returns 409 (no manifest/asset yet). Poll for
+  // readiness so playback starts automatically when the pipeline publishes it — instead of making
+  // the user manually refresh (which also generated the 404 storms that tripped the playback alarm).
+  useEffect(() => {
+    if (!meta || !shouldPollForReadiness(meta.status, !!streamUrl)) return;
+    let cancelled = false;
+    let attempts = 0;
+    const maxAttempts = 60; // ~3 min at 3s — beyond a typical short-clip transcode
+    const iv = setInterval(async () => {
+      if (cancelled || attempts >= maxAttempts) {
+        clearInterval(iv);
+        return;
+      }
+      attempts++;
+      try {
+        const r = await svc<{ url: string }>("streaming", `/videos/${id}/stream-url`);
+        if (!cancelled && r?.url) {
+          setStreamUrl(r.url);
+          svc<{ url: string }>("streaming", `/videos/${id}/thumbnail-url`)
+            .then((t) => !cancelled && setPosterUrl(t.url))
+            .catch(() => {});
+        }
+      } catch {
+        // still processing (409) — keep polling
+      }
+    }, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+  }, [id, meta, streamUrl]);
+
   // Count a view once playback passes 5s (deduped per session), and record watch history.
   // Invoked by VideoPlayer via onWatched.
   const handleWatched = useCallback(() => {
@@ -136,9 +169,9 @@ export default function WatchPage() {
     );
   }
 
-  const isFailed = meta.status === "failed";
-  const isProcessing =
-    !isFailed && (!streamUrl || meta.status === "pending" || meta.status === "processing");
+  const playback = playbackState(meta.status, !!streamUrl);
+  const isFailed = playback === "failed";
+  const isProcessing = playback === "processing";
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -152,7 +185,7 @@ export default function WatchPage() {
         <div className="w-full aspect-video bg-neutral-900 rounded-lg flex flex-col items-center justify-center gap-3">
           <div className="text-4xl">⏳</div>
           <p className="text-neutral-400 text-lg">Video is processing...</p>
-          <p className="text-neutral-500 text-sm">This may take a few minutes. Refresh to check status.</p>
+          <p className="text-neutral-500 text-sm">This may take a few minutes. Playback will start automatically when it&apos;s ready.</p>
         </div>
       ) : (
         <VideoPlayer streamUrl={streamUrl} posterUrl={posterUrl || undefined} onWatched={handleWatched} />

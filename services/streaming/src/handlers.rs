@@ -33,6 +33,44 @@ pub fn decide_delivery(visibility: Visibility, manifest_url: Option<String>) -> 
     Delivery::PresignMp4
 }
 
+/// Why a video has no servable asset yet — used only once we've established there's no manifest and
+/// no playable S3 object. A not-yet-transcoded video must NOT return a bare 404: the watch page
+/// polls right after upload, and a 404 there is indistinguishable from a genuinely missing video —
+/// which is exactly what tripped the `video-playback-failing` alarm on normal post-upload views.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unservable {
+    /// Still transcoding (draft/processing) — transient; the client should poll. -> 409.
+    Processing,
+    /// Transcode failed — terminal, but still not a "missing video" 404. -> 409.
+    Failed,
+    /// No such video, or a published video whose asset is genuinely gone. -> 404.
+    Missing,
+}
+
+/// Classify why there's no servable asset, from the video's status (`None` = no row at all). Pure so
+/// it unit-tests without DynamoDB.
+pub fn unservable_reason(status: Option<VideoStatus>) -> Unservable {
+    match status {
+        Some(VideoStatus::Draft) | Some(VideoStatus::Processing) => Unservable::Processing,
+        Some(VideoStatus::Failed) => Unservable::Failed,
+        // Published-but-no-asset, or no row. (Deleted is handled earlier as NotFound.)
+        _ => Unservable::Missing,
+    }
+}
+
+impl Unservable {
+    /// Map to an HTTP error. `missing_msg` is the 404 body for the genuinely-missing case (differs
+    /// between stream-url and thumbnail-url). Processing/Failed become 409 so they stay out of the
+    /// playback-404 metric.
+    fn into_error(self, missing_msg: &str) -> AppError {
+        match self {
+            Unservable::Processing => AppError::Conflict("video is still processing".to_string()),
+            Unservable::Failed => AppError::Conflict("video processing failed".to_string()),
+            Unservable::Missing => AppError::NotFound(missing_msg.to_string()),
+        }
+    }
+}
+
 pub async fn stream_url(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -56,17 +94,19 @@ pub async fn stream_url(
         }
         None => Visibility::Public,
     };
+    let status = access.as_ref().map(|(_, _, status)| *status);
 
     let manifest_url = repo::get_video_manifest_url(&state.db, &video_id).await?;
 
     let url = match decide_delivery(visibility, manifest_url) {
         Delivery::Manifest(m) => m,
-        Delivery::PresignMp4 => {
-            let s3_key = repo::get_video_s3_key(&state.db, &video_id)
-                .await?
-                .ok_or_else(|| AppError::NotFound("video not found".to_string()))?;
-            repo::presign_get_url(&state.s3, &state.bucket, &s3_key).await?
-        }
+        Delivery::PresignMp4 => match repo::get_video_s3_key(&state.db, &video_id).await? {
+            Some(s3_key) => repo::presign_get_url(&state.s3, &state.bucket, &s3_key).await?,
+            // No manifest and no playable object: distinguish "still processing" (409, client
+            // polls) from "genuinely missing" (404) so a normal post-upload poll isn't logged as a
+            // playback failure.
+            None => return Err(unservable_reason(status).into_error("video not found")),
+        },
     };
 
     Ok(Json(StreamUrlResponse {
@@ -82,23 +122,26 @@ pub async fn thumbnail_url(
     Path(video_id): Path<String>,
 ) -> Result<Json<StreamUrlResponse>, AppError> {
     // Check visibility for private videos
-    if let Some((visibility, channel_id, status)) =
-        repo::get_video_access_info(&state.db, &video_id).await?
-    {
-        if status == VideoStatus::Deleted {
+    let access = repo::get_video_access_info(&state.db, &video_id).await?;
+    if let Some((visibility, channel_id, status)) = &access {
+        if *status == VideoStatus::Deleted {
             return Err(AppError::NotFound("no thumbnail".to_string()));
         }
-        if visibility == Visibility::Private {
+        if *visibility == Visibility::Private {
             let caller = shared::auth::authenticate(&state.db, &headers).await.ok();
-            if caller.as_ref() != Some(&channel_id) {
+            if caller.as_ref() != Some(channel_id) {
                 return Err(AppError::Forbidden("this video is private".to_string()));
             }
         }
     }
+    let status = access.as_ref().map(|(_, _, status)| *status);
 
-    let thumb_key = repo::get_video_thumbnail_key(&state.db, &video_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("no thumbnail".to_string()))?;
+    let thumb_key = match repo::get_video_thumbnail_key(&state.db, &video_id).await? {
+        Some(k) => k,
+        // Same not-ready-vs-missing distinction as stream_url: a thumbnail isn't generated until
+        // transcode publishes, so a processing video's thumbnail poll must be a 409, not a 404.
+        None => return Err(unservable_reason(status).into_error("no thumbnail")),
+    };
 
     let url = repo::presign_get_url(&state.s3, &state.bucket, &thumb_key).await?;
 
@@ -154,6 +197,62 @@ mod tests {
         assert_eq!(
             decide_delivery(Visibility::Public, None),
             Delivery::PresignMp4
+        );
+    }
+
+    #[test]
+    fn unservable_reason_treats_draft_and_processing_as_processing() {
+        assert_eq!(
+            super::unservable_reason(Some(shared::video::VideoStatus::Draft)),
+            super::Unservable::Processing
+        );
+        assert_eq!(
+            super::unservable_reason(Some(shared::video::VideoStatus::Processing)),
+            super::Unservable::Processing
+        );
+    }
+
+    #[test]
+    fn unservable_reason_treats_failed_as_failed() {
+        assert_eq!(
+            super::unservable_reason(Some(shared::video::VideoStatus::Failed)),
+            super::Unservable::Failed
+        );
+    }
+
+    #[test]
+    fn unservable_reason_treats_published_or_no_row_as_missing() {
+        assert_eq!(
+            super::unservable_reason(Some(shared::video::VideoStatus::Published)),
+            super::Unservable::Missing
+        );
+        assert_eq!(super::unservable_reason(None), super::Unservable::Missing);
+    }
+
+    #[test]
+    fn unservable_maps_processing_and_failed_to_409_and_missing_to_404() {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        assert_eq!(
+            super::Unservable::Processing
+                .into_error("video not found")
+                .into_response()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            super::Unservable::Failed
+                .into_error("video not found")
+                .into_response()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            super::Unservable::Missing
+                .into_error("video not found")
+                .into_response()
+                .status(),
+            StatusCode::NOT_FOUND
         );
     }
 }

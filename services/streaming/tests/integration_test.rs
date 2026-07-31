@@ -71,17 +71,31 @@ async fn setup() -> Router {
         .send()
         .await;
 
-    // Insert a test video with s3_key
+    // Insert a test video with s3_key (published, legacy progressive -> served via presign)
     let mut item = std::collections::HashMap::new();
     item.insert("video_id".into(), AttributeValue::S("vid-1".into()));
     item.insert(
         "s3_key".into(),
         AttributeValue::S("uploads/vid-1/original.mp4".into()),
     );
-    item.insert("status".into(), AttributeValue::S("ready".into()));
+    item.insert("status".into(), AttributeValue::S("published".into()));
     db.put_item()
         .table_name("test_videos")
         .set_item(Some(item))
+        .send()
+        .await
+        .unwrap();
+
+    // A still-transcoding video: no manifest_url, no s3_key yet. Must be "not ready" (409), not 404.
+    let mut processing = std::collections::HashMap::new();
+    processing.insert(
+        "video_id".into(),
+        AttributeValue::S("vid-processing".into()),
+    );
+    processing.insert("status".into(), AttributeValue::S("processing".into()));
+    db.put_item()
+        .table_name("test_videos")
+        .set_item(Some(processing))
         .send()
         .await
         .unwrap();
@@ -160,4 +174,23 @@ async fn stream_url_not_found() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// A still-transcoding video must return 409 (not ready), not 404 — so a normal post-upload poll
+/// isn't counted as a playback failure by the video-playback-failing alarm.
+#[tokio::test]
+async fn stream_url_processing_returns_409_not_404() {
+    let app = setup().await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/videos/vid-processing/stream-url")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
 }
