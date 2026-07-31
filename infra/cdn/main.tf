@@ -395,28 +395,54 @@ variable "cloudfront_total_error_rate_threshold" {
   default     = 25
 }
 
+variable "cloudfront_min_requests" {
+  description = "Minimum CloudFront requests in a 5-min period before the error-rate alarms evaluate. Below this the distribution is effectively idle and a per-request percentage is meaningless (a single 404 on 2 requests = 50%). Gates out low-traffic false positives on this demo; real playback generates far more requests per window."
+  type        = number
+  default     = 50
+}
+
 # The single biggest playback blind spot: video bytes (HLS/MP4/thumbnails) reach viewers via this
 # distribution, not the ALB, so an edge/origin 5xx is invisible to every ALB/per-service alarm.
 # 5xxErrorRate + TotalErrorRate are default (free) CloudFront metrics; dimension Region = "Global".
-# (OriginLatency would require the paid additional-metrics monitoring subscription — omitted, matching
-# the project's cost stance on paid CloudWatch/WAF features.)
+# Both are GATED on request volume via metric math (IF Requests >= cloudfront_min_requests) — a
+# percentage over 1-2 requests is meaningless and produced a false page during a deploy (one 404 on
+# two requests = 50%). (OriginLatency would require the paid additional-metrics monitoring
+# subscription — omitted, matching the project's cost stance on paid CloudWatch/WAF features.)
 resource "aws_cloudwatch_metric_alarm" "cloudfront_5xx" {
   provider            = aws.us_east_1
   alarm_name          = "rewind-${var.environment}-cdn-5xx-error-rate"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
-  metric_name         = "5xxErrorRate"
-  namespace           = "AWS/CloudFront"
-  period              = 300
-  statistic           = "Average"
   threshold           = var.cloudfront_5xx_error_rate_threshold
-  alarm_description   = "CloudFront 5xx error rate > ${var.cloudfront_5xx_error_rate_threshold}% — video delivery (HLS/MP4/thumbnails) is failing at the edge/origin"
+  alarm_description   = "CloudFront 5xx error rate > ${var.cloudfront_5xx_error_rate_threshold}% (with >= ${var.cloudfront_min_requests} req/5min) — video delivery (HLS/MP4/thumbnails) is failing at the edge/origin"
   alarm_actions       = [aws_sns_topic.global_alerts.arn]
   treat_missing_data  = "notBreaching"
 
-  dimensions = {
-    DistributionId = aws_cloudfront_distribution.videos.id
-    Region         = "Global"
+  metric_query {
+    id          = "gated"
+    expression  = "IF(reqs >= ${var.cloudfront_min_requests}, rate, 0)"
+    label       = "5xxErrorRate (gated on >= ${var.cloudfront_min_requests} req/5min)"
+    return_data = true
+  }
+  metric_query {
+    id = "rate"
+    metric {
+      metric_name = "5xxErrorRate"
+      namespace   = "AWS/CloudFront"
+      period      = 300
+      stat        = "Average"
+      dimensions  = { DistributionId = aws_cloudfront_distribution.videos.id, Region = "Global" }
+    }
+  }
+  metric_query {
+    id = "reqs"
+    metric {
+      metric_name = "Requests"
+      namespace   = "AWS/CloudFront"
+      period      = 300
+      stat        = "Sum"
+      dimensions  = { DistributionId = aws_cloudfront_distribution.videos.id, Region = "Global" }
+    }
   }
 }
 
@@ -425,18 +451,36 @@ resource "aws_cloudwatch_metric_alarm" "cloudfront_total_error" {
   alarm_name          = "rewind-${var.environment}-cdn-total-error-rate"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
-  metric_name         = "TotalErrorRate"
-  namespace           = "AWS/CloudFront"
-  period              = 300
-  statistic           = "Average"
   threshold           = var.cloudfront_total_error_rate_threshold
-  alarm_description   = "CloudFront total error rate > ${var.cloudfront_total_error_rate_threshold}% (4xx+5xx) — broad content-delivery failure"
+  alarm_description   = "CloudFront total error rate > ${var.cloudfront_total_error_rate_threshold}% (4xx+5xx, with >= ${var.cloudfront_min_requests} req/5min) — broad content-delivery failure"
   alarm_actions       = [aws_sns_topic.global_alerts.arn]
   treat_missing_data  = "notBreaching"
 
-  dimensions = {
-    DistributionId = aws_cloudfront_distribution.videos.id
-    Region         = "Global"
+  metric_query {
+    id          = "gated"
+    expression  = "IF(reqs >= ${var.cloudfront_min_requests}, rate, 0)"
+    label       = "TotalErrorRate (gated on >= ${var.cloudfront_min_requests} req/5min)"
+    return_data = true
+  }
+  metric_query {
+    id = "rate"
+    metric {
+      metric_name = "TotalErrorRate"
+      namespace   = "AWS/CloudFront"
+      period      = 300
+      stat        = "Average"
+      dimensions  = { DistributionId = aws_cloudfront_distribution.videos.id, Region = "Global" }
+    }
+  }
+  metric_query {
+    id = "reqs"
+    metric {
+      metric_name = "Requests"
+      namespace   = "AWS/CloudFront"
+      period      = 300
+      stat        = "Sum"
+      dimensions  = { DistributionId = aws_cloudfront_distribution.videos.id, Region = "Global" }
+    }
   }
 }
 
