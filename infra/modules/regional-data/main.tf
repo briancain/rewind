@@ -214,6 +214,22 @@ resource "aws_s3_bucket_lifecycle_configuration" "raw" {
       days = 30
     }
   }
+
+  # Reclaim abandoned multipart uploads. A failed /uploads/complete leaves an *incomplete* multipart
+  # upload behind; its parts are not S3 objects, so the 30-day object expiration above never removes
+  # them and they accrue storage cost indefinitely (a stranded 725 MB upload from a live-demo failure
+  # is what surfaced this). Abort incomplete uploads 7 days after initiation — well beyond any
+  # legitimate large-upload window.
+  rule {
+    id     = "abort-incomplete-multipart-uploads"
+    status = "Enabled"
+
+    filter {}
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
 }
 
 resource "aws_s3_bucket_cors_configuration" "raw" {
