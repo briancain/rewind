@@ -55,6 +55,10 @@ variable "crr_peer_region" {
 
 locals {
   crr_enabled = var.crr_peer_region != ""
+
+  # HTTP request-serving services (exclude the queue-driven workers transcode/delete-cleanup, which
+  # have no request path). Used for the per-service latency filters/alarms.
+  request_serving_services = ["identity", "video-catalog", "upload", "streaming", "social", "search"]
   # Per replicated bucket: the source/destination bucket names + rule id used as the S3 replication
   # metric dimensions (SourceBucket / DestinationBucket / RuleId). Rule ids match regional-data's CRR
   # rules ("<bucket>-to-<peer_region>"). Empty map when CRR is off → no alarms created.
@@ -104,6 +108,12 @@ variable "feed_4xx_threshold" {
   description = "4xx responses on /videos/feed (sum over 5 min) above which the feed-4xx alarm fires. The public feed should almost never 4xx, so a small sustained rate signals a broken client contract."
   type        = number
   default     = 20
+}
+
+variable "service_latency_p95_threshold_ms" {
+  description = "Per-service p95 request latency (ms, from the log latency_ms field) above which the latency alarm fires. A per-journey signal the aggregate ALB p95 alarm would average out."
+  type        = number
+  default     = 2000
 }
 
 variable "log_group_prefix" {
@@ -211,6 +221,25 @@ resource "aws_cloudwatch_log_metric_filter" "feed_4xx" {
     name      = "feed-4xx-count"
     namespace = "${var.name}/CustomerExperience"
     value     = "1"
+  }
+}
+
+# Per-service request latency. The aggregate ALB p95 alarm can hide a single slow journey (one
+# service slow while the ALB-wide p95 looks fine), so extract each request-serving service's
+# latency_ms (logged by shared::middleware on every response as a number) and alarm per service.
+# Excludes /health (fast + high-volume, would skew the percentile). value = the logged latency_ms.
+resource "aws_cloudwatch_log_metric_filter" "service_latency" {
+  for_each = toset(local.request_serving_services)
+
+  name           = "${var.name}-${each.key}-latency"
+  log_group_name = var.log_group_prefix
+  pattern        = "{ $.kubernetes.container_name = \"${each.key}\" && $.log_processed.fields.message = \"response\" && $.log_processed.span.path != \"/health\" }"
+
+  metric_transformation {
+    name      = "${each.key}-latency-ms"
+    namespace = "${var.name}/Services"
+    value     = "$.log_processed.fields.latency_ms"
+    unit      = "Milliseconds"
   }
 }
 
@@ -720,6 +749,25 @@ resource "aws_cloudwatch_metric_alarm" "feed_4xx_spike" {
   statistic           = "Sum"
   threshold           = var.feed_4xx_threshold
   alarm_description   = "Feed 4xx (/videos/feed) > ${var.feed_4xx_threshold} in 5 min — broken client contract on the public feed"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  treat_missing_data  = "notBreaching"
+  tags                = var.tags
+}
+
+# Per-service p95 latency (from the service_latency filters). Fires when one journey is slow even if
+# the ALB-wide p95 stays healthy. Sustained 5 min to avoid flapping on transient spikes.
+resource "aws_cloudwatch_metric_alarm" "service_latency_high" {
+  for_each = toset(local.request_serving_services)
+
+  alarm_name          = "${var.name}-${each.key}-latency-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 5
+  metric_name         = "${each.key}-latency-ms"
+  namespace           = "${var.name}/Services"
+  period              = 60
+  extended_statistic  = "p95"
+  threshold           = var.service_latency_p95_threshold_ms
+  alarm_description   = "${each.key} p95 request latency > ${var.service_latency_p95_threshold_ms}ms for 5 minutes"
   alarm_actions       = [aws_sns_topic.alerts.arn]
   treat_missing_data  = "notBreaching"
   tags                = var.tags

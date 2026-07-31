@@ -31,7 +31,7 @@ pub fn with_logging<S: Clone + Send + Sync + 'static>(app: Router<S>) -> Router<
                     |res: &axum::http::Response<_>, latency: std::time::Duration, _span: &Span| {
                         tracing::info!(
                             status = res.status().as_u16(),
-                            latency_ms = latency.as_millis(),
+                            latency_ms = latency.as_millis() as u64,
                             "response"
                         );
                     },
@@ -40,7 +40,7 @@ pub fn with_logging<S: Clone + Send + Sync + 'static>(app: Router<S>) -> Router<
                     |err: ServerErrorsFailureClass, latency: std::time::Duration, _span: &Span| {
                         tracing::error!(
                             error = %err,
-                            latency_ms = latency.as_millis(),
+                            latency_ms = latency.as_millis() as u64,
                             "request failed"
                         );
                     },
