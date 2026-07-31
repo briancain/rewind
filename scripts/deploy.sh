@@ -167,7 +167,7 @@ for svc in "${SERVICES[@]}"; do
     -f "$ROOT/helm/values/${svc}.yaml" \
     --namespace rewind \
     "${SETS[@]}" \
-    --wait --timeout 120s
+    --wait --timeout 300s
 done
 
 # --- Transcode reconcile CronJob ---
@@ -231,7 +231,7 @@ helm upgrade --install frontend "$ROOT/helm/rewind-service" \
   --namespace rewind \
   --set image.repository="$FRONTEND_REPO" \
   --set image.tag="$TAG" \
-  --wait --timeout 120s
+  --wait --timeout 300s
 
 # --- Canary ---
 # Its own image + its own standalone chart (helm/canary): the scheduled CronJobs (shallow + deep)
