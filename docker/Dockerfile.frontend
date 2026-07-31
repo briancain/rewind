@@ -6,6 +6,10 @@ ARG NEXT_PUBLIC_UPLOAD_URL
 ARG NEXT_PUBLIC_STREAMING_URL
 ARG NEXT_PUBLIC_SOCIAL_URL
 ARG NEXT_PUBLIC_SEARCH_URL
+# Link-preview (Open Graph) metadata on the watch page: the frontend's own origin for og:url and
+# the content-CDN origin for the public og:image thumbnail. Inlined at build like the service URLs.
+ARG NEXT_PUBLIC_SITE_URL
+ARG NEXT_PUBLIC_CDN_URL
 
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./

@@ -220,6 +220,8 @@ finch build \
   --build-arg "NEXT_PUBLIC_STREAMING_URL=https://streaming.${DOMAIN}" \
   --build-arg "NEXT_PUBLIC_SOCIAL_URL=https://social.${DOMAIN}" \
   --build-arg "NEXT_PUBLIC_SEARCH_URL=https://search.${DOMAIN}" \
+  --build-arg "NEXT_PUBLIC_SITE_URL=https://${DOMAIN}" \
+  --build-arg "NEXT_PUBLIC_CDN_URL=https://cdn.${DOMAIN}" \
   -t "${FRONTEND_REPO}:${TAG}" \
   -f "$ROOT/docker/Dockerfile.frontend" \
   "$ROOT"

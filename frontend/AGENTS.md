@@ -23,9 +23,13 @@ npm test            # jest
 
 - **Next.js 16 App Router + React 19 + TypeScript + Tailwind v4.** Dark-first theme
   (neutral/red palette); light/dark via CSS variables + `components/ThemeToggle.tsx`.
-- **Everything is a client component (`"use client"`).** There is **no** server-side data
-  fetching, no Server Components data layer, and no server actions. Pages fetch on the client.
-  → Most of the Next.js "breaking changes" warning above concerns server features we don't use,
+- **Almost everything is a client component (`"use client"`).** Pages fetch on the client; there
+  is no Server Components data layer and no server actions. **The one exception** is the watch
+  route: `app/watch/[id]/page.tsx` is a thin **Server Component** that exports `generateMetadata`
+  (for Slack/Discord/Twitter link-preview Open Graph tags — see `lib/metadata.ts`) and renders the
+  interactive client UI in `WatchClient.tsx`. When you add server-rendered metadata to another
+  route, follow that split (server `page.tsx` for `generateMetadata` + a `"use client"` child).
+  → Most of the Next.js "breaking changes" warning above concerns server features we barely use,
     but still read the bundled docs before reaching for any new Next API.
 - **API access goes through `lib/api.ts`.** Use `svc(service, path, options?)` — `service` is one
   of `identity | catalog | upload | streaming | social | search`, each a separate backend with its
