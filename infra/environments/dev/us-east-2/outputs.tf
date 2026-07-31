@@ -93,3 +93,9 @@ output "transcode_completions_queue_url" {
 output "alb_arn_suffix" {
   value = data.aws_lb.ingress.arn_suffix
 }
+
+# Consumed by the infra/cdn stack (via remote state) for the global Route 53 health-check alarm
+# (HealthCheckStatus metrics are published only in us-east-1).
+output "health_check_id" {
+  value = aws_route53_health_check.regional.id
+}

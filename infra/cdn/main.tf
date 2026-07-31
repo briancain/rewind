@@ -440,6 +440,50 @@ resource "aws_cloudwatch_metric_alarm" "cloudfront_total_error" {
   }
 }
 
+# --- Route 53 health-check alarms (HealthCheckStatus is global, published only in us-east-1) ---
+# The per-region health checks drive latency-failover. If a region's check goes unhealthy, viewers
+# are silently failed away to the other region (added latency + the ~1-2s cross-region login race that
+# can 401). HealthCheckStatus is 1 (healthy) / 0 (unhealthy); alarm when it drops below 1. Health-check
+# ids come from each env's remote state. Primary always; secondary only when the origin group exists.
+resource "aws_cloudwatch_metric_alarm" "route53_health_primary" {
+  provider            = aws.us_east_1
+  alarm_name          = "rewind-${var.environment}-route53-health-us-west-2"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "HealthCheckStatus"
+  namespace           = "AWS/Route53"
+  period              = 60
+  statistic           = "Minimum"
+  threshold           = 1
+  alarm_description   = "Route 53 health check for us-west-2 is unhealthy — the region is failing away, viewers routed cross-region"
+  alarm_actions       = [aws_sns_topic.global_alerts.arn]
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    HealthCheckId = data.terraform_remote_state.regional_usw2.outputs.health_check_id
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "route53_health_secondary" {
+  count               = local.secondary_enabled ? 1 : 0
+  provider            = aws.us_east_1
+  alarm_name          = "rewind-${var.environment}-route53-health-${var.secondary_region}"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "HealthCheckStatus"
+  namespace           = "AWS/Route53"
+  period              = 60
+  statistic           = "Minimum"
+  threshold           = 1
+  alarm_description   = "Route 53 health check for ${var.secondary_region} is unhealthy — the region is failing away, viewers routed cross-region"
+  alarm_actions       = [aws_sns_topic.global_alerts.arn]
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    HealthCheckId = data.terraform_remote_state.regional_secondary[0].outputs.health_check_id
+  }
+}
+
 output "cdn_domain" {
   value = local.cdn_domain
 }
