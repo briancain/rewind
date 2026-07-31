@@ -89,6 +89,34 @@ delete.)
   Intentionally NOT changed by either pass: the `rewind` project-name prefix and the `rewind` AWS
   profile default are kept as-is.
 
+- [ ] **Presigned multipart part-URL expiry hardening (large uploads).** Upload presigns every part
+  URL with a fixed `expires_in` of 1h (`upload/repo.rs`) but signs with the pod's IRSA credentials,
+  whose remaining lifetime is shorter — the AWS SDK logs `EXPIRATION_WARNING` at initiate time. A
+  presigned URL is only valid for `min(expires_in, remaining-credential-life)`, so a genuinely large
+  upload (the 5 GB max ≈ 1000 parts uploaded sequentially over many minutes) can have later part PUTs
+  start returning `403 ExpiredToken` mid-upload once the signing credentials lapse, then `/complete`
+  fails on the missing parts. Deferred because it did **not** cause the observed `/complete` failures
+  (those were the swallowed-error bug, now fixed — uploads that finish inside the credential window
+  are unaffected), and a correct fix is architectural rather than a one-liner: naively capping
+  `expires_in` to the credential lifetime only *shortens* the valid window and can make large uploads
+  fail sooner. The real fix is lazy/batched presigning (a "get URLs for parts N..M" endpoint the
+  client calls as it advances) and/or a longer IRSA session, which needs its own design pass
+  (batch size, session duration, resumable-upload UX) and a near-expiry-credential test. Only matters
+  once real multi-GB uploads happen.
+
+- [ ] **Stuck-draft reconciler + `Rewind/Upload StuckDrafts` alarm.** Nothing alarms on a video that
+  is created (`status=draft`) but whose upload never completes — it just lingers as a draft (as the
+  "Bunny Part 2" incident did, silently). Direct analogue of the existing per-region transcode
+  (`StuckTranscodes`) and deletion (`UnreclaimedDeletions`) reconcilers: a CronJob scans the `videos`
+  Global Table for `status=draft && created_at` older than a threshold, emits `Rewind/Upload
+  StuckDrafts` (per Region, every run incl. 0 so it self-clears) + a `notBreaching` alarm. Deferred
+  because it is net-new infra (new CronJob + scoped read-only IRSA + Helm wiring), and the real-time
+  signal from surfacing the `/complete` error + the new `upload-failing` CX alarm already makes a
+  failing-upload wave visible when it happens — the reconciler only adds the slower "abandoned draft"
+  detection. Also needs a design decision first (detect-and-alarm only, mirroring the other two
+  reconcilers, vs. auto-cleaning old drafts — which overlaps legitimate long-lived drafts and the raw
+  bucket's abort-incomplete-MPU lifecycle).
+
 ## Future ideas
 
 - [ ] **Content moderation + site admin.** No admin/moderation capability exists today — no way to
