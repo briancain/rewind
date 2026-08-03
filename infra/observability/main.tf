@@ -72,12 +72,14 @@ locals {
   videos_to_cleanup_pipe  = "${var.name}-videos-to-cleanup"
   opensearch_domain_name  = "${var.name}-search"
   completions_eb_dlq_name = "${var.name}-transcode-completions-eventbridge-dlq"
+  completions_queue_name  = "${var.name}-transcode-completions"
 
   services = ["identity", "video-catalog", "upload", "streaming", "social", "search", "transcode", "frontend"]
 
-  # Each region occupies a vertical band: a height-2 header text widget, then the 36-row metric grid
-  # (original single-region layout offset by +2). Band height = 38; region idx i starts at i*38.
-  band_height = 38
+  # Each region occupies a vertical band: a height-2 header text widget, then the metric grid
+  # (original single-region layout offset by +2), then a diagnostics row at +38. Band height = 44;
+  # region idx i starts at i*44.
+  band_height = 44
 
   widgets = flatten([
     for idx, r in var.regions : [
@@ -303,6 +305,61 @@ locals {
           ]
           view  = "timeSeries"
           yAxis = { left = { min = 0, max = 1 } }
+        }
+      },
+      # --- Diagnostics row (saturation / leading signals) — NOT alarmed; this is the "why" you look
+      # at when a customer-symptom alarm fires. Deliberately dashboard-only per the symptom-based
+      # alerting stance (see DESIGN §10.8): none of these page, because none of them means a customer
+      # is broken on its own (a crash-looping pod with a healthy peer, a warm node, lost redundancy).
+      {
+        type   = "metric"
+        x      = 0
+        y      = idx * local.band_height + 38
+        width  = 8
+        height = 6
+        properties = {
+          title  = "Node Saturation (diagnostic)"
+          region = r
+          metrics = [
+            ["ContainerInsights", "node_cpu_utilization", "ClusterName", var.name, { stat = "Average", period = 300, label = "Node CPU % (cluster avg)" }],
+            ["ContainerInsights", "node_memory_utilization", "ClusterName", var.name, { stat = "Average", period = 300, label = "Node Mem % (cluster avg)" }],
+            ["ContainerInsights", "cluster_failed_node_count", "ClusterName", var.name, { stat = "Maximum", period = 300, label = "Failed nodes" }],
+          ]
+          view = "timeSeries"
+        }
+      },
+      {
+        type   = "metric"
+        x      = 8
+        y      = idx * local.band_height + 38
+        width  = 8
+        height = 6
+        properties = {
+          title  = "Running Pods per Service (diagnostic)"
+          region = r
+          metrics = [
+            for svc in local.services :
+            ["ContainerInsights", "service_number_of_running_pods", "ClusterName", var.name, "Namespace", "rewind", "Service", svc, { stat = "Minimum", period = 300, label = svc }]
+          ]
+          view = "timeSeries"
+        }
+      },
+      {
+        type   = "metric"
+        x      = 16
+        y      = idx * local.band_height + 38
+        width  = 8
+        height = 6
+        properties = {
+          title  = "Pod Restarts & Dependency Health (diagnostic)"
+          region = r
+          metrics = [
+            [{ expression = "SEARCH('{ContainerInsights,ClusterName,FullPodName,Namespace,PodName} MetricName=\"pod_number_of_container_restarts\" Namespace=\"rewind\"', 'Maximum', 300)", id = "restarts", label = "pod restarts" }],
+            [{ expression = "SEARCH('{AWS/DynamoDB,Operation,TableName} MetricName=\"SystemErrors\"', 'Sum', 300)", id = "ddberr", label = "DDB SystemErrors" }],
+            [{ expression = "SEARCH('{AWS/ApplicationELB,LoadBalancer,TargetGroup} MetricName=\"UnHealthyHostCount\" LoadBalancer=\"${data.terraform_remote_state.region[r].outputs.alb_arn_suffix}\"', 'Maximum', 60)", id = "unhealthy", label = "ALB unhealthy hosts" }],
+            ["AWS/SQS", "ApproximateAgeOfOldestMessage", "QueueName", local.completions_queue_name, { stat = "Maximum", period = 60, label = "Completions queue age (s)" }],
+          ]
+          view = "timeSeries"
         }
       },
     ]

@@ -826,6 +826,37 @@ resource "aws_cloudwatch_metric_alarm" "alb_latency" {
   tags = var.tags
 }
 
+# Telemetry heartbeat — "are my log-based alarms even alive?". ~half the customer-experience alarms
+# are log-metric-filters that use treat_missing_data=notBreaching, so if the log pipeline breaks
+# (Fluent Bit down, IAM/addon failure, or the structured-log JSON shape drifts) those alarms go
+# silent and simply never fire — a blind spot that hides real customer pain. This alarm inverts the
+# usual pattern: it watches raw log ingestion into the application log group and treats ABSENCE as
+# the failure (treat_missing_data=breaching), so "no logs arriving" pages instead of passing quietly.
+# It keys on IncomingLogEvents (shape-independent — it counts events, not parsed fields), which has a
+# constant nonzero baseline here (ALB health checks + the hourly canary + real traffic), so a drop to
+# zero for ~15 min genuinely means the pipeline is broken. Routed to the page topic: if this fires,
+# the log-based half of the alarm suite can no longer be trusted.
+resource "aws_cloudwatch_metric_alarm" "log_pipeline_heartbeat" {
+  alarm_name          = "${var.name}-log-pipeline-silent"
+  comparison_operator = "LessThanOrEqualToThreshold"
+  evaluation_periods  = 3
+  datapoints_to_alarm = 3
+  metric_name         = "IncomingLogEvents"
+  namespace           = "AWS/Logs"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 0
+  alarm_description   = "No application logs ingested for ~15 min — the log pipeline is down and the log-based (customer-experience) alarms are blind"
+  alarm_actions       = [local.page_topic_arn]
+  treat_missing_data  = "breaching"
+
+  dimensions = {
+    LogGroupName = var.log_group_prefix
+  }
+
+  tags = var.tags
+}
+
 # --- Alarms: Customer Experience (from log metric filters) ---
 
 resource "aws_cloudwatch_metric_alarm" "streaming_playback_failing" {
@@ -1261,6 +1292,33 @@ resource "aws_cloudwatch_metric_alarm" "transcode_completions_eventbridge_dlq" {
 
   dimensions = {
     QueueName = var.transcode_completions_eventbridge_dlq_name
+  }
+
+  tags = var.tags
+}
+
+# Completion events that the publish consumer failed to process maxReceiveCount times land in the
+# transcode-completions SQS DLQ. Any message = a MediaConvert result that never got applied, so the
+# video is stranded in `processing` and never plays. This is the SQS-consumer-side counterpart to the
+# EventBridge-delivery DLQ alarm above (which catches loss in transit); together they cover both ways
+# a completion can be lost. The stuck-transcode reconciler catches the resulting symptom too, but
+# only after its 60-min threshold — this fires immediately on the silent breakage. Name derived to
+# match regional-data ("${var.name}-transcode-completions-dlq"). Mirrors the other DLQ alarms.
+resource "aws_cloudwatch_metric_alarm" "transcode_completions_dlq" {
+  alarm_name          = "${var.name}-transcode-completions-dlq-not-empty"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  alarm_description   = "Transcode completion events landed in the SQS DLQ — a MediaConvert result was never applied (video stuck in processing)"
+  alarm_actions       = [local.ticket_topic_arn]
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    QueueName = "${var.name}-transcode-completions-dlq"
   }
 
   tags = var.tags
