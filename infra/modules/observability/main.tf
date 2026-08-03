@@ -15,6 +15,12 @@ variable "alert_email" {
   type = string
 }
 
+variable "page_alert_email" {
+  description = "Email for high-severity (page) alarms — region/edge down (ALB 503s), OpenSearch RED, broken end-to-end canary journeys. Empty = fall back to alert_email (same recipient) until a pager is wired up."
+  type        = string
+  default     = ""
+}
+
 variable "sqs_queue_name" {
   type = string
 }
@@ -93,9 +99,15 @@ variable "web_acl_name" {
 }
 
 variable "waf_blocked_requests_threshold" {
-  description = "BlockedRequests (sum over 5 min) above which the WAF-blocking alarm fires. Tuned to catch a rate-limit/managed-rule misconfig blocking real users, above the routine bot-blocking baseline."
+  description = "Total BlockedRequests (all rules, sum over 5 min) above which the WAF-blocking alarm fires. Set well above the routine scanner/bot-blocking baseline (managed-rule groups block internet background-radiation waves that can reach a few thousand in a 5-min window) so it only fires on a sustained blocking flood, not an ordinary scan. Real-user impact is tracked separately by the rate-limit-rule alarm."
   type        = number
-  default     = 500
+  default     = 3000
+}
+
+variable "waf_rate_limit_block_threshold" {
+  description = "Blocks by the WAF per-source-IP rate-based rule (sum over 5 min) above which the rate-limit alarm fires. Kept low relative to the aggregate blocked-requests threshold because a rate-limit block, unlike a managed-rule block, plausibly hits real users (shared NAT egress, a too-low limit) — so a modest sustained count is worth investigating."
+  type        = number
+  default     = 100
 }
 
 variable "auth_4xx_threshold" {
@@ -132,8 +144,19 @@ variable "tags" {
   default = {}
 }
 
-# --- SNS Topic (single email subscriber) ---
+# --- SNS Topics (severity-split) ---
+#
+# Two topics so an outage doesn't page at the same urgency as routine noise (a scanner-driven WAF
+# spike, a single thumbnail 404, a replication blip). The bulk of alarms are "investigate" and stay
+# on `alerts` (name preserved for backwards-compat + existing subscriptions); a tight, defensible
+# "wake me up" set — region/edge effectively down (ALB 503s), OpenSearch cluster RED, and the
+# end-to-end canary journeys — routes to `alerts-page` instead. Until a real pager is wired up (P2),
+# the page topic defaults to the SAME email as `alert_email`, so this is a pure routing/structure
+# change today: no recipient is lost, and swapping in PagerDuty/OpsGenie later is a one-line
+# subscription add on the page topic. Individual component alarms can be promoted to `page` as their
+# blast radius justifies it (tracked with the composite-alarm work in TASKS.md).
 
+# Low-severity / "investigate" (ticket) topic — the default for the majority of alarms.
 resource "aws_sns_topic" "alerts" {
   name = "${var.name}-alerts"
   tags = var.tags
@@ -143,6 +166,24 @@ resource "aws_sns_topic_subscription" "email" {
   topic_arn = aws_sns_topic.alerts.arn
   protocol  = "email"
   endpoint  = var.alert_email
+}
+
+# High-severity / "page" topic — outage-class alarms only (see local.page_topic_arn consumers).
+resource "aws_sns_topic" "alerts_page" {
+  name = "${var.name}-alerts-page"
+  tags = var.tags
+}
+
+resource "aws_sns_topic_subscription" "page_email" {
+  topic_arn = aws_sns_topic.alerts_page.arn
+  protocol  = "email"
+  endpoint  = var.page_alert_email != "" ? var.page_alert_email : var.alert_email
+}
+
+locals {
+  # Alarm-action routing. Most alarms use the ticket topic; outage-class alarms use the page topic.
+  ticket_topic_arn = aws_sns_topic.alerts.arn
+  page_topic_arn   = aws_sns_topic.alerts_page.arn
 }
 
 # --- Log Metric Filters ---
@@ -367,7 +408,7 @@ resource "aws_cloudwatch_metric_alarm" "alb_elb_5xx" {
   statistic           = "Sum"
   threshold           = 10
   alarm_description   = "ALB-generated 5xx > 10 in 1 minute (e.g. no healthy targets -> 503s)"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
+  alarm_actions       = [local.page_topic_arn]
   treat_missing_data  = "notBreaching"
 
   dimensions = {
@@ -377,27 +418,99 @@ resource "aws_cloudwatch_metric_alarm" "alb_elb_5xx" {
   tags = var.tags
 }
 
-# Legitimate customers blocked at the edge by WAF are otherwise invisible: a rate-based-rule or
-# managed-rule misconfig 403s real users before they reach the ALB (no per-service 5xx, no ALB 5xx).
-# Routine bot-blocking is expected, so this fires only on a surge well above baseline (tunable).
+# Total WAF blocks across ALL rules. This is dominated by the AWS managed rule groups blocking
+# internet background-radiation (opportunistic vuln scanners: XSS/LFI/RFI probes, bad IP reputation)
+# — expected, benign, and bursty (a single scan wave can block a few thousand in one 5-min window).
+# So this is deliberately a HIGH, SUSTAINED alarm: it fires only when blocking stays above the
+# threshold across multiple periods (a real blocking flood / volumetric event), not on a lone scan
+# burst. The customer-facing question — "are we blocking real users?" — is answered by the
+# rate-limit-rule alarm below, NOT this aggregate (managed-rule blocks are almost never real users).
 # Dimensions: the web ACL (WebACL + Region); Rule = ALL aggregates every rule's blocks.
 resource "aws_cloudwatch_metric_alarm" "waf_blocking_spike" {
   alarm_name          = "${var.name}-waf-blocking-spike"
   comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 1
+  evaluation_periods  = 3
+  datapoints_to_alarm = 2
   metric_name         = "BlockedRequests"
   namespace           = "AWS/WAFV2"
   period              = 300
   statistic           = "Sum"
   threshold           = var.waf_blocked_requests_threshold
-  alarm_description   = "WAF blocked > ${var.waf_blocked_requests_threshold} requests in 5 min — possible rate-limit/managed-rule misconfig blocking real users"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
+  alarm_description   = "WAF blocked > ${var.waf_blocked_requests_threshold} requests/5min in 2 of 3 periods — a sustained blocking flood (not a routine scanner burst)"
+  alarm_actions       = [local.ticket_topic_arn]
   treat_missing_data  = "notBreaching"
 
   dimensions = {
     WebACL = var.web_acl_name
     Region = var.region
     Rule   = "ALL"
+  }
+
+  tags = var.tags
+}
+
+# Real-user-impact WAF signal: blocks attributed specifically to the per-source-IP rate-based rule.
+# Unlike the managed-rule blocks (scanners), a rate-limit block is a plausible legitimate client —
+# e.g. many users behind one NAT/corporate egress IP, or a too-low limit after a traffic change.
+# A sustained count here means real users may be getting 403'd at the edge (invisible to ALB/service
+# 5xx). The Rule dimension value matches the rate-based rule's name in the WAF module ("rate-limit").
+resource "aws_cloudwatch_metric_alarm" "waf_rate_limit_blocking" {
+  alarm_name          = "${var.name}-waf-rate-limit-blocking"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "BlockedRequests"
+  namespace           = "AWS/WAFV2"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = var.waf_rate_limit_block_threshold
+  alarm_description   = "WAF rate-limit rule blocked > ${var.waf_rate_limit_block_threshold} requests in 5 min — real users may be getting rate-limited (NAT egress, too-low limit)"
+  alarm_actions       = [local.ticket_topic_arn]
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    WebACL = var.web_acl_name
+    Region = var.region
+    Rule   = "rate-limit"
+  }
+
+  tags = var.tags
+}
+
+# L7 request-flood / volumetric-attack signal. The WAF rate-based rule only blocks a SINGLE source
+# IP exceeding its per-IP limit, so a DISTRIBUTED flood (many IPs each under the limit, no managed-
+# rule signature) passes straight through and is invisible to every block-based alarm — it only
+# surfaces later as latency/5xx. This watches total inbound RequestCount against a CloudWatch
+# anomaly-detection band trained on normal traffic, so an abnormal surge pages the operator up front.
+# Ticket-severity + sustained (2 of 3 periods) to ride out the noise a low-traffic baseline produces;
+# genuine customer impact from a flood is separately caught (and paged) by the latency/5xx/canary
+# alarms. The band self-trains from history (widens on low/erratic traffic), so early on it is a
+# coarse signal that tightens as data accumulates.
+resource "aws_cloudwatch_metric_alarm" "alb_request_flood" {
+  alarm_name          = "${var.name}-alb-request-flood"
+  comparison_operator = "GreaterThanUpperThreshold"
+  evaluation_periods  = 3
+  datapoints_to_alarm = 2
+  threshold_metric_id = "band"
+  alarm_description   = "ALB request volume is anomalously high — possible L7 flood/DDoS (distributed, under the WAF per-IP rate limit)"
+  alarm_actions       = [local.ticket_topic_arn]
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id          = "reqs"
+    return_data = true
+    metric {
+      metric_name = "RequestCount"
+      namespace   = "AWS/ApplicationELB"
+      period      = 300
+      stat        = "Sum"
+      dimensions  = { LoadBalancer = var.alb_arn_suffix }
+    }
+  }
+  metric_query {
+    id          = "band"
+    expression  = "ANOMALY_DETECTION_BAND(reqs, 3)"
+    label       = "RequestCount (expected band)"
+    return_data = true
   }
 
   tags = var.tags
@@ -453,7 +566,7 @@ resource "aws_cloudwatch_metric_alarm" "opensearch_red" {
   statistic           = "Maximum"
   threshold           = 1
   alarm_description   = "OpenSearch cluster status is RED"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
+  alarm_actions       = [local.page_topic_arn]
   treat_missing_data  = "notBreaching"
 
   dimensions = {
@@ -475,6 +588,57 @@ resource "aws_cloudwatch_metric_alarm" "opensearch_disk" {
   threshold           = 3000
   alarm_description   = "OpenSearch free storage < 3GB"
   alarm_actions       = [aws_sns_topic.alerts.arn]
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    DomainName = var.opensearch_domain_name
+    ClientId   = data.aws_caller_identity.current.account_id
+  }
+
+  tags = var.tags
+}
+
+# JVM memory pressure on the (single-node) OpenSearch domain. This is a known, documented failure
+# mode for this platform: sustained high heap pressure drives long GC pauses that stall queries,
+# time out the search client, and flap the read-path canary — all while OpenSearch's own query
+# latency looks fine. cluster-red + disk alarms don't see it. Maximum > 80% sustained over 15 min
+# is the standard early-warning threshold (well below the ~92% level at which OpenSearch starts
+# blocking writes), giving headroom to react (rightsize the node) before it turns into an outage.
+resource "aws_cloudwatch_metric_alarm" "opensearch_jvm_pressure" {
+  alarm_name          = "${var.name}-opensearch-jvm-pressure"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "JVMMemoryPressure"
+  namespace           = "AWS/ES"
+  period              = 300
+  statistic           = "Maximum"
+  threshold           = 80
+  alarm_description   = "OpenSearch JVM memory pressure > 80% for 15 min — GC stalls degrade/timeout search before cluster status turns RED"
+  alarm_actions       = [local.ticket_topic_arn]
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    DomainName = var.opensearch_domain_name
+    ClientId   = data.aws_caller_identity.current.account_id
+  }
+
+  tags = var.tags
+}
+
+# Sustained high CPU on the single-node domain — the other saturation axis behind the same
+# read-path degradation (a burstable instance running out of CPU credits stalls queries just like
+# heap pressure does). Ticket-severity early warning to rightsize before it becomes customer-facing.
+resource "aws_cloudwatch_metric_alarm" "opensearch_cpu" {
+  alarm_name          = "${var.name}-opensearch-cpu-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/ES"
+  period              = 300
+  statistic           = "Maximum"
+  threshold           = 80
+  alarm_description   = "OpenSearch CPU > 80% for 15 min — search queries degrade/time out under sustained CPU saturation"
+  alarm_actions       = [local.ticket_topic_arn]
   treat_missing_data  = "notBreaching"
 
   dimensions = {
@@ -922,7 +1086,7 @@ resource "aws_cloudwatch_metric_alarm" "canary_deep_failing" {
   statistic           = "Minimum"
   threshold           = 1
   alarm_description   = "Deep canary failed — the multi-actor journey (auth/social/stream/delete+cascade) is broken"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
+  alarm_actions       = [local.page_topic_arn]
   treat_missing_data  = "notBreaching"
 
   dimensions = {
@@ -950,7 +1114,7 @@ resource "aws_cloudwatch_metric_alarm" "canary_shallow_failing" {
   statistic           = "Minimum"
   threshold           = 1
   alarm_description   = "Shallow canary failed 2 of the last 3 runs — health/feed/search read path is broken"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
+  alarm_actions       = [local.page_topic_arn]
   treat_missing_data  = "notBreaching"
 
   dimensions = {
@@ -978,7 +1142,7 @@ resource "aws_cloudwatch_metric_alarm" "canary_region_routing_failing" {
   statistic           = "Minimum"
   threshold           = 1
   alarm_description   = "Shallow canary region-routing step failed in ${var.region} — Route 53 latency routing sent this region's traffic to the other region's ALB"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
+  alarm_actions       = [local.page_topic_arn]
   treat_missing_data  = "notBreaching"
 
   dimensions = {
