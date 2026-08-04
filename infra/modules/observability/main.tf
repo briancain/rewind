@@ -105,9 +105,15 @@ variable "waf_blocked_requests_threshold" {
 }
 
 variable "waf_rate_limit_block_threshold" {
-  description = "Blocks by the WAF per-source-IP rate-based rule (sum over 5 min) above which the rate-limit alarm fires. Kept low relative to the aggregate blocked-requests threshold because a rate-limit block, unlike a managed-rule block, plausibly hits real users (shared NAT egress, a too-low limit) — so a modest sustained count is worth investigating."
+  description = "Blocks by the WAF GLOBAL per-source-IP rate-based rule (sum over 5 min) above which the rate-limit alarm fires. Kept low relative to the aggregate blocked-requests threshold because a rate-limit block, unlike a managed-rule block, plausibly hits real users (shared NAT egress, a too-low limit) — so a modest sustained count is worth investigating. The auth-scoped rate rule has its own alarm/threshold."
   type        = number
   default     = 100
+}
+
+variable "waf_auth_rate_limit_block_threshold" {
+  description = "Blocks by the WAF auth-scoped rate-based rule (POSTs to /login + /register, sum over 5 min) above which the auth-rate-limit alarm fires. Defaults to 0 (any block alarms): exceeding that rule's per-IP budget means a single source made more auth attempts in 5 minutes than any human can, so a block is inherently high-signal and rare — unlike the global rule, whose budget ordinary traffic can legitimately approach. Raise it if a scanner makes this chatty."
+  type        = number
+  default     = 0
 }
 
 variable "auth_4xx_threshold" {
@@ -471,6 +477,42 @@ resource "aws_cloudwatch_metric_alarm" "waf_rate_limit_blocking" {
     WebACL = var.web_acl_name
     Region = var.region
     Rule   = "rate-limit"
+  }
+
+  tags = var.tags
+}
+
+# Auth-abuse signal: blocks attributed to the auth-scoped rate-based rule (POSTs to /login +
+# /register). Distinct in meaning from the two alarms above, which is why it is its own alarm rather
+# than being folded into the global rate-limit one:
+#   - the aggregate alarm means "we are blocking a lot" (usually scanners, benign),
+#   - the global rate-limit alarm means "we may be blocking real users" (a false-positive risk),
+#   - this one means "a single source is guessing credentials or invite codes fast enough to be
+#     throttled" — i.e. the control WORKED and an attack was blunted.
+# So it is informational-but-real rather than an outage: ticket severity, not page. Nothing is broken
+# for users when it fires; it is the record that someone tried. Follow up in the WAF request logs for
+# the source IP and in the auth-4xx metric for how far they got before the throttle engaged.
+# If it ever fires without an attacker, the limit is too low for legitimate shared-egress traffic —
+# raise module.waf's auth_rate_limit rather than silencing this.
+resource "aws_cloudwatch_metric_alarm" "waf_auth_rate_limit_blocking" {
+  alarm_name          = "${var.name}-waf-auth-rate-limit-blocking"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "BlockedRequests"
+  namespace           = "AWS/WAFV2"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = var.waf_auth_rate_limit_block_threshold
+  alarm_description   = "WAF auth rate-limit rule blocked > ${var.waf_auth_rate_limit_block_threshold} POSTs to /login+/register in 5 min — a single source is guessing credentials/invite codes and is being throttled. Not user-facing breakage; check the WAF logs for the source IP"
+  alarm_actions       = [local.ticket_topic_arn]
+  treat_missing_data  = "notBreaching"
+
+  # Must match the auth rate-based rule's NAME in the WAF module ("auth-rate-limit"), not its
+  # metric_name — the CloudWatch Rule dimension carries the rule name.
+  dimensions = {
+    WebACL = var.web_acl_name
+    Region = var.region
+    Rule   = "auth-rate-limit"
   }
 
   tags = var.tags

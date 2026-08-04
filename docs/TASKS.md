@@ -118,15 +118,6 @@ delete.)
   set for the smallest marginal gain. Worth doing when a question needs ALB-side timing (e.g.
   distinguishing target latency from ALB queueing during a flood).
 
-- [ ] **Auth-scoped WAF rate-based rule.** The web ACL's per-IP limit is 2000 req/5-min, tuned for
-  volumetric floods — roughly an order of magnitude above what a single IP needs to run an effective
-  invite-code / credential guessing loop against `POST /register` + `POST /login`, so that traffic is
-  invisible to the block-based alarms. Add a second rate-based rule scoped by a `byte_match_statement`
-  on those two paths at a much lower limit (order of 100 req/5-min per IP). Kept separate from the
-  global limit deliberately: lowering *that* would rate-limit ordinary read traffic arriving from
-  behind a shared NAT. Needs a threshold chosen against real login volume first, plus a decision on
-  whether it blocks or counts initially.
-
 ## Future ideas
 
 - [ ] **Content moderation + site admin.** No admin/moderation capability exists today — no way to

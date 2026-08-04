@@ -23,6 +23,12 @@ variable "rate_limit" {
   default     = 2000
 }
 
+variable "auth_rate_limit" {
+  description = "Max POSTs to /login + /register per 5-minute window per source IP before the auth rate-based rule blocks. Deliberately far below var.rate_limit: that limit is sized for volumetric abuse and is roughly an order of magnitude above what one IP needs to run an effective credential / invite-code guessing loop, so auth needs its own much tighter budget. Kept as a SEPARATE rule rather than lowering the global limit, because the global limit also governs ordinary read traffic arriving from behind a shared NAT or corporate egress IP."
+  type        = number
+  default     = 100
+}
+
 resource "aws_wafv2_web_acl" "this" {
   name        = "${var.name}-alb"
   scope       = "REGIONAL"
@@ -120,6 +126,102 @@ resource "aws_wafv2_web_acl" "this" {
     visibility_config {
       cloudwatch_metrics_enabled = true
       metric_name                = "${var.name}-known-bad-inputs"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  # 5. Auth-scoped rate limiting — a much tighter per-IP budget for the two credential endpoints.
+  #
+  # Rule 1's 2000/5-min is sized for volumetric abuse, so a single IP can guess invite codes or
+  # passwords at a few hundred requests per window and never come close to it — invisible to every
+  # block-based alarm and only visible after the fact as an auth-4xx spike. This caps that specific
+  # behaviour without touching read traffic, which is why it is a separate rule instead of a lower
+  # global limit (many legitimate users can share one NAT/corporate egress IP).
+  #
+  # The scope-down MUST require POST. The frontend serves `GET /login` as a page, so matching the
+  # path alone would count ordinary page views toward the budget and could 403 real users behind a
+  # shared egress IP. Only the JSON POSTs that actually attempt a credential are counted.
+  #
+  # Placed last so the existing rules keep their priorities (renumbering managed rule groups is
+  # needless churn). A request blocked by an earlier rule never reaches this one and so is not
+  # counted, which is fine: the managed groups almost never match a well-formed auth POST.
+  #
+  # Both path matches use a LOWERCASE transformation so a cased variant can't slip the rule; such a
+  # request 404s at the service anyway, and rate-limiting it is harmless.
+  rule {
+    name     = "auth-rate-limit"
+    priority = 4
+
+    action {
+      block {}
+    }
+
+    statement {
+      rate_based_statement {
+        limit              = var.auth_rate_limit
+        aggregate_key_type = "IP"
+
+        scope_down_statement {
+          and_statement {
+            statement {
+              byte_match_statement {
+                search_string         = "post"
+                positional_constraint = "EXACTLY"
+
+                field_to_match {
+                  method {}
+                }
+
+                text_transformation {
+                  priority = 0
+                  type     = "LOWERCASE"
+                }
+              }
+            }
+
+            statement {
+              or_statement {
+                statement {
+                  byte_match_statement {
+                    search_string         = "/login"
+                    positional_constraint = "EXACTLY"
+
+                    field_to_match {
+                      uri_path {}
+                    }
+
+                    text_transformation {
+                      priority = 0
+                      type     = "LOWERCASE"
+                    }
+                  }
+                }
+
+                statement {
+                  byte_match_statement {
+                    search_string         = "/register"
+                    positional_constraint = "EXACTLY"
+
+                    field_to_match {
+                      uri_path {}
+                    }
+
+                    text_transformation {
+                      priority = 0
+                      type     = "LOWERCASE"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.name}-auth-rate-limit"
       sampled_requests_enabled   = true
     }
   }
