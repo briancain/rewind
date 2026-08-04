@@ -10,18 +10,15 @@ use crate::models::*;
 use crate::password;
 use crate::repo;
 use crate::state::AppState;
+use crate::validate;
 
 pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<AuthResponse>), AppError> {
-    repo::validate_invite_code(&state.db, &req.invite_code).await?;
+    validate::register(&req)?;
 
-    if req.password.len() < 8 {
-        return Err(AppError::BadRequest(
-            "password must be at least 8 characters".to_string(),
-        ));
-    }
+    repo::validate_invite_code(&state.db, &req.invite_code).await?;
 
     if repo::find_user_by_email(&state.db, &req.email)
         .await?
@@ -66,6 +63,8 @@ pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, AppError> {
+    validate::login(&req)?;
+
     let user = repo::find_user_by_email(&state.db, &req.email)
         .await?
         .ok_or_else(|| AppError::Unauthorized("invalid credentials".to_string()))?;
@@ -109,11 +108,7 @@ pub async fn change_password(
     let token = shared::auth::extract_token(&headers)?;
     let user_id = shared::auth::get_session_user_id(&state.db, &token).await?;
 
-    if req.new_password.len() < 8 {
-        return Err(AppError::BadRequest(
-            "password must be at least 8 characters".to_string(),
-        ));
-    }
+    validate::password(&req.new_password)?;
 
     let current_hash = repo::get_password_hash(&state.db, &user_id).await?;
     if !password::verify_password(&req.current_password, &current_hash) {

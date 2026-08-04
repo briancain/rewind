@@ -3,3 +3,4 @@ pub mod models;
 pub mod password;
 pub mod repo;
 pub mod state;
+pub mod validate;

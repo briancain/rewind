@@ -47,6 +47,9 @@ pub async fn list_videos(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<VideoList>, AppError> {
     let mut videos = if let Some(channel_id) = params.get("channel_id") {
+        // `channel_id` is the channel-index key condition — an empty value is a client error, not a
+        // server fault (`?channel_id=` otherwise reached DynamoDB and became a 500).
+        shared::validate::key_field("channel_id", channel_id)?;
         repo::list_by_channel(&state.db, channel_id).await?
     } else {
         repo::list_feed(&state.db).await?

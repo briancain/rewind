@@ -1,10 +1,13 @@
 //! Shallow tier: hourly, read-only, no writes, no teardown. Health endpoints +
-//! public feed + a search query against the existing real videos. The cheap liveness/correctness
-//! signal — safe to run frequently.
+//! public feed + a search query against the existing real videos + an error-contract probe
+//! (malformed input must be 4xx, not 5xx). The cheap liveness/correctness signal — safe to run
+//! frequently.
 
 use std::time::Instant;
 
-use crate::assertions::{assert_routed_in_region, assert_search, expect_status};
+use crate::assertions::{
+    assert_routed_in_region, assert_search, expect_client_error, expect_status,
+};
 use crate::client::RewindClient;
 use crate::config::CanaryConfig;
 use crate::dns::resolve_ips;
@@ -57,7 +60,36 @@ pub async fn run(client: &RewindClient, cfg: &CanaryConfig) -> RunReport {
         report.record("search", start.elapsed(), result);
     }
 
-    // 4. Region routing (cloud-only): from inside this region, the latency-routed public host must
+    // 4. Error-contract probe: malformed input must come back 4xx, never 5xx. Two shapes on two
+    //    services — a blank JSON body field and a blank query param — both of which land in a
+    //    DynamoDB key position, which is where an unvalidated empty string turns into a 500 and
+    //    pollutes the per-service 5xx alarms. Writes nothing (both requests fail validation before
+    //    any mutation), so it stays safe for the read-only tier.
+    {
+        let start = Instant::now();
+        let result: Result<(), String> = async {
+            let login = client
+                .post(
+                    &format!("{}/login", client.endpoints.identity),
+                    None,
+                    Some(serde_json::json!({ "email": "", "password": "x" })),
+                )
+                .await?;
+            expect_client_error(login.status, "identity /login (blank email)")?;
+
+            let list = client
+                .get(
+                    &format!("{}/videos?channel_id=", client.endpoints.catalog),
+                    None,
+                )
+                .await?;
+            expect_client_error(list.status, "catalog /videos (blank channel_id)")
+        }
+        .await;
+        report.record("input-validation", start.elapsed(), result);
+    }
+
+    // 5. Region routing (cloud-only): from inside this region, the latency-routed public host must
     //    resolve to THIS region's own ALB — i.e. the same address pool as the region-pinned host
     //    `<region>.<domain>`. A disjoint result means Route 53 latency routing sent this region's
     //    traffic to the other region's ALB (a regression). Skipped locally (no public latency

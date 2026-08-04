@@ -131,6 +131,9 @@ pub async fn delete_history_entry(
     let watched_at = params
         .get("watched_at")
         .ok_or_else(|| AppError::BadRequest("missing watched_at".to_string()))?;
+    // `watched_at` is the view_history range key — reject a blank value here rather than letting
+    // DynamoDB refuse it as an unhandled error.
+    shared::validate::key_field("watched_at", watched_at)?;
     repo::delete_view_history_entry(&state.db, &user_id, watched_at).await?;
     Ok(StatusCode::NO_CONTENT)
 }

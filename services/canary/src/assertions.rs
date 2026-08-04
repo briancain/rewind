@@ -30,6 +30,27 @@ pub fn expect_status_in(actual: u16, allowed: &[u16], ctx: &str) -> CanaryResult
     }
 }
 
+/// Assert a status is a *client* error (4xx), explicitly failing on a 5xx.
+///
+/// Guards the platform's error contract from the outside: malformed caller input must map to a 4xx,
+/// so a 5xx keeps meaning "unexpected fault" and the per-service 5xx alarms stay trustworthy
+/// (DESIGN §10.10). Unit tests cover the pure validators, but only a blackbox probe catches a
+/// handler that stopped calling one — or a new unguarded field.
+pub fn expect_client_error(actual: u16, ctx: &str) -> CanaryResult<()> {
+    if (400..500).contains(&actual) {
+        Ok(())
+    } else if actual >= 500 {
+        Err(format!(
+            "{ctx}: malformed input returned HTTP {actual} — a client error must not surface as a \
+             server error"
+        ))
+    } else {
+        Err(format!(
+            "{ctx}: malformed input was accepted with HTTP {actual}, expected a 4xx"
+        ))
+    }
+}
+
 /// Assert a value is non-empty (e.g. a returned token or URL).
 pub fn expect_non_empty(value: &str, ctx: &str) -> CanaryResult<()> {
     if value.trim().is_empty() {
@@ -195,6 +216,30 @@ mod tests {
     fn expect_status_in_matches_any() {
         assert!(expect_status_in(204, &[200, 204], "ctx").is_ok());
         assert!(expect_status_in(403, &[200, 204], "ctx").is_err());
+    }
+
+    #[test]
+    fn expect_client_error_accepts_any_4xx() {
+        for status in [400, 401, 403, 404, 409, 422, 429] {
+            assert!(
+                expect_client_error(status, "ctx").is_ok(),
+                "HTTP {status} should count as a client error"
+            );
+        }
+    }
+
+    #[test]
+    fn expect_client_error_rejects_5xx_with_a_pointed_message() {
+        let err = expect_client_error(500, "identity /login blank email").unwrap_err();
+        assert!(err.contains("must not surface as a server error"));
+        assert!(err.contains("HTTP 500"));
+    }
+
+    #[test]
+    fn expect_client_error_rejects_a_success() {
+        // Malformed input being *accepted* is also a regression.
+        let err = expect_client_error(200, "catalog blank channel_id").unwrap_err();
+        assert!(err.contains("was accepted"));
     }
 
     #[test]

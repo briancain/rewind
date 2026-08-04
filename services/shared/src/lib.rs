@@ -8,4 +8,5 @@ pub mod health;
 pub mod middleware;
 pub mod tables;
 pub mod tracing_setup;
+pub mod validate;
 pub mod video;

@@ -59,6 +59,33 @@ impl AppError {
         }
     }
 
+    /// Classify a **DynamoDB** service error code, the sibling of [`from_aws_code`](Self::from_aws_code).
+    ///
+    /// `ValidationException` means DynamoDB rejected the *request itself* as malformed. Every call
+    /// that reaches this classifier goes through the [`crate::dynamo`] helpers (`get_item`,
+    /// `put_item`, `delete_item`, `query_by_index`, `scan_all`, `batch_delete`), which build their
+    /// requests purely from a caller-supplied key/item map and a fixed key-condition expression —
+    /// so a validation failure there is caller *data* (an empty string in a key attribute, an
+    /// oversized item, a wrong key type), not a server-side coding error. Mapping it to a 400 is
+    /// what stops `{"email": ""}` from being counted as an unexpected fault by the per-service 5xx
+    /// alarms (DESIGN §10.10).
+    ///
+    /// Server-assembled expressions deliberately do *not* route through here: the dynamic
+    /// `update_item` calls in the repos use `.map_err(AppError::internal)`, so a genuine
+    /// expression bug still surfaces as a 500 and still pages the 5xx alarm.
+    ///
+    /// Everything else — throttling, permissions, network, timeouts (`code` is `None` for a
+    /// non-service error) — is an infra fault and stays a 500.
+    pub fn from_dynamo_code(code: Option<&str>) -> AppError {
+        match code.unwrap_or("") {
+            "ValidationException" => AppError::BadRequest("invalid request parameter".to_string()),
+            other => {
+                let detail = if other.is_empty() { "unknown" } else { other };
+                AppError::Internal(format!("dynamodb: {detail}"))
+            }
+        }
+    }
+
     /// Map an AWS SDK error to an [`AppError`], logging the underlying service code and the full
     /// error context. Use this (rather than [`internal`](Self::internal)) at S3/AWS call sites where
     /// a client-caused failure should surface as a 4xx instead of a spurious 500 — most notably the
@@ -82,15 +109,30 @@ impl AppError {
     }
 }
 
-// `?` ergonomics for the two SDKs every repo touches. Both map to `Internal` (a failed AWS call is
-// a server-side error). Other sources (reqwest, serde_json, sigv4, std::io) map at the call site
-// with `.map_err(AppError::internal)` so `shared` needn't depend on them.
+// `?` ergonomics for the two SDKs every repo touches. Other sources (reqwest, serde_json, sigv4,
+// std::io) map at the call site with `.map_err(AppError::internal)` so `shared` needn't depend on
+// them.
+//
+// DynamoDB errors are *classified* (see `from_dynamo_code`) rather than blanket-mapped to `Internal`:
+// the `dynamo` helpers build their requests from caller-supplied keys, so a `ValidationException`
+// there is bad client input and must be a 4xx. The code is logged because an
+// `aws_sdk_dynamodb::Error`'s bare `Display` is only `"unhandled error (ValidationException)"` — no
+// operation, no table, no key.
 impl From<aws_sdk_dynamodb::Error> for AppError {
     fn from(e: aws_sdk_dynamodb::Error) -> Self {
-        AppError::internal(e)
+        use aws_smithy_types::error::metadata::ProvideErrorMetadata;
+        let code = e.code().map(str::to_string);
+        tracing::error!(
+            aws_error_code = code.as_deref().unwrap_or("none"),
+            error = %e,
+            "dynamodb call failed"
+        );
+        AppError::from_dynamo_code(code.as_deref())
     }
 }
 
+// A failed S3 call reached through `?` is a server-side error; call sites that need client-error
+// classification use `from_aws` explicitly.
 impl From<aws_sdk_s3::Error> for AppError {
     fn from(e: aws_sdk_s3::Error) -> Self {
         AppError::internal(e)
@@ -230,6 +272,53 @@ mod tests {
         assert_eq!(
             AppError::from_aws_code("list_parts", None).to_string(),
             "internal error: list_parts: unknown"
+        );
+    }
+
+    #[test]
+    fn from_dynamo_code_maps_validation_exception_to_400() {
+        // Caller data DynamoDB refuses — an empty string in a key attribute, an oversized item.
+        // This must not be counted as an unexpected fault by the per-service 5xx alarms.
+        let e = AppError::from_dynamo_code(Some("ValidationException"));
+        assert_eq!(e.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn from_dynamo_code_validation_message_leaks_no_internals() {
+        assert_eq!(
+            AppError::from_dynamo_code(Some("ValidationException")).to_string(),
+            "bad request: invalid request parameter"
+        );
+    }
+
+    #[test]
+    fn from_dynamo_code_maps_infra_and_unknown_codes_to_500() {
+        for code in [
+            Some("ProvisionedThroughputExceededException"),
+            Some("ThrottlingException"),
+            Some("AccessDeniedException"),
+            Some("InternalServerError"),
+            Some("ResourceNotFoundException"),
+            None, // non-service error (timeout / dispatch failure) has no code
+        ] {
+            let e = AppError::from_dynamo_code(code);
+            assert_eq!(
+                e.into_response().status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "code {code:?} should stay a 500"
+            );
+        }
+    }
+
+    #[test]
+    fn from_dynamo_code_internal_message_includes_the_code() {
+        assert_eq!(
+            AppError::from_dynamo_code(Some("ThrottlingException")).to_string(),
+            "internal error: dynamodb: ThrottlingException"
+        );
+        assert_eq!(
+            AppError::from_dynamo_code(None).to_string(),
+            "internal error: dynamodb: unknown"
         );
     }
 }
