@@ -111,7 +111,7 @@ variable "waf_rate_limit_block_threshold" {
 }
 
 variable "auth_4xx_threshold" {
-  description = "4xx responses on /login + /register (sum over 5 min) above which the auth-4xx alarm fires. Above the routine wrong-password/duplicate-email baseline, so it catches a systemic break (auth outage, broken registration/invite validation, bad deploy)."
+  description = "4xx responses on /login + /register (sum over 5 min) above which the auth-4xx alarm fires. Above the routine wrong-password/duplicate-email baseline, so it catches either abuse (credential / invite-code guessing — the usual cause) or a systemic break (auth outage, broken registration/invite validation, bad deploy)."
   type        = number
   default     = 50
 }
@@ -476,22 +476,26 @@ resource "aws_cloudwatch_metric_alarm" "waf_rate_limit_blocking" {
   tags = var.tags
 }
 
-# L7 request-flood / volumetric-attack signal. The WAF rate-based rule only blocks a SINGLE source
-# IP exceeding its per-IP limit, so a DISTRIBUTED flood (many IPs each under the limit, no managed-
-# rule signature) passes straight through and is invisible to every block-based alarm — it only
-# surfaces later as latency/5xx. This watches total inbound RequestCount against a CloudWatch
-# anomaly-detection band trained on normal traffic, so an abnormal surge pages the operator up front.
-# Ticket-severity + sustained (2 of 3 periods) to ride out the noise a low-traffic baseline produces;
-# genuine customer impact from a flood is separately caught (and paged) by the latency/5xx/canary
-# alarms. The band self-trains from history (widens on low/erratic traffic), so early on it is a
-# coarse signal that tightens as data accumulates.
+# L7 request-flood / scanner-sweep signal. The rate-based rules only block a source IP that exceeds
+# their per-IP limit, so anything staying UNDER that limit passes straight through and is invisible to
+# every block-based alarm. Two shapes do this: a distributed flood (many IPs, each modest) and — just
+# as commonly — a single-source scanner or scripted sweep whose rate is nowhere near the volumetric
+# limit. Either way it only surfaces later as latency/5xx. This watches total inbound RequestCount
+# against a CloudWatch anomaly-detection band trained on normal traffic, so an abnormal surge is
+# reported up front. Ticket-severity + sustained (2 of 3 periods) to ride out the noise a low-traffic
+# baseline produces; genuine customer impact from a flood is separately caught (and paged) by the
+# latency/5xx/canary alarms. The band self-trains from history (widens on low/erratic traffic), so
+# early on it is a coarse signal that tightens as data accumulates. Note the baseline here is mostly
+# Route 53 health checks, which are steady — that makes the band tight, so a modest multiple of
+# normal traffic can cross it. Pair this with the WAF request logs to see whether the surge is one
+# source or many before treating it as a DDoS.
 resource "aws_cloudwatch_metric_alarm" "alb_request_flood" {
   alarm_name          = "${var.name}-alb-request-flood"
   comparison_operator = "GreaterThanUpperThreshold"
   evaluation_periods  = 3
   datapoints_to_alarm = 2
   threshold_metric_id = "band"
-  alarm_description   = "ALB request volume is anomalously high — possible L7 flood/DDoS (distributed, under the WAF per-IP rate limit)"
+  alarm_description   = "ALB request volume is anomalously high — an L7 flood or a scanner sweep, from a single IP or many, staying under the WAF per-IP rate limits. Check the WAF logs to see if it is one source or distributed"
   alarm_actions       = [local.ticket_topic_arn]
   treat_missing_data  = "notBreaching"
 
@@ -939,7 +943,13 @@ resource "aws_cloudwatch_metric_alarm" "upload_failing" {
 }
 
 # Auth 4xx surge (login/register) — see the auth_4xx filter. Threshold sits above the routine
-# wrong-password/duplicate-email baseline so it fires on a systemic break, not normal user error.
+# wrong-password/duplicate-email baseline so it fires on a systemic break or on abuse, not normal
+# user error. Ordered by observed likelihood: the common cause is credential / invite-code guessing
+# from a scanner or bot, which is abuse rather than breakage — the platform working as designed while
+# something hammers it. The signature distinguishes them: mostly 401s on /login is credential
+# stuffing, mostly 400s on /register is invite-code guessing, and a broad mix across both (especially
+# alongside a `-broken` 5xx alarm or a fresh deploy) points at a genuine regression instead. Check
+# the WAF request logs for the source before assuming a bad deploy.
 resource "aws_cloudwatch_metric_alarm" "auth_4xx_spike" {
   alarm_name          = "${var.name}-auth-4xx-spike"
   comparison_operator = "GreaterThanThreshold"
@@ -949,7 +959,7 @@ resource "aws_cloudwatch_metric_alarm" "auth_4xx_spike" {
   period              = 300
   statistic           = "Sum"
   threshold           = var.auth_4xx_threshold
-  alarm_description   = "Auth 4xx (login/register) > ${var.auth_4xx_threshold} in 5 min — possible auth outage, broken registration/invite validation, or bad deploy"
+  alarm_description   = "Auth 4xx (login/register) > ${var.auth_4xx_threshold} in 5 min — usually credential/invite-code guessing; also an auth outage, broken registration/invite validation, or a bad deploy. Check the WAF logs for a source IP"
   alarm_actions       = [aws_sns_topic.alerts.arn]
   treat_missing_data  = "notBreaching"
   tags                = var.tags
