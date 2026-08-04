@@ -140,10 +140,104 @@ resource "aws_wafv2_web_acl_association" "this" {
   web_acl_arn  = aws_wafv2_web_acl.this.arn
 }
 
+# --- Request logging ---------------------------------------------------------------------------
+#
+# Without this, the only record of who sent a request is `wafv2:GetSampledRequests`, which returns a
+# *sample* and retains just 3 hours — so any abuse investigation started more than a few hours after
+# the fact cannot attribute traffic to a source at all. Logging every evaluated request (not only
+# blocked ones: the traffic worth attributing is usually what the default-allow action let through)
+# gives client IP, method, URI, headers, country and rule matches, queryable in Logs Insights for the
+# retention window.
+#
+# Volume note: this logs health checks too (Route 53 probes are the bulk of steady-state traffic).
+# WAF's logging_filter can only match on action or rule label, not URI, so they can't be excluded;
+# retention is kept short instead to bound the cost rather than sampling and losing the signal.
+
+variable "log_retention_days" {
+  description = "Retention for the WAF request log group. Long enough to investigate an incident found days later; short enough to bound the cost of logging every request."
+  type        = number
+  default     = 14
+}
+
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
+resource "aws_cloudwatch_log_group" "waf" {
+  # WAFv2 requires a CloudWatch destination log group name to begin with `aws-waf-logs-`.
+  name              = "aws-waf-logs-${var.name}-alb"
+  retention_in_days = var.log_retention_days
+
+  tags = {
+    Name = "aws-waf-logs-${var.name}-alb"
+  }
+}
+
+# WAF delivers through the CloudWatch Logs delivery service, which needs an explicit resource policy
+# when the logging configuration is created via the API (the console writes one implicitly). Scoped
+# to this log group, and confused-deputy-guarded on the source account/ARN.
+data "aws_iam_policy_document" "waf_logs" {
+  statement {
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["delivery.logs.amazonaws.com"]
+    }
+
+    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+    resources = ["${aws_cloudwatch_log_group.waf.arn}:*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*"]
+    }
+  }
+}
+
+resource "aws_cloudwatch_log_resource_policy" "waf_logs" {
+  policy_name     = "${var.name}-waf-logs"
+  policy_document = data.aws_iam_policy_document.waf_logs.json
+}
+
+resource "aws_wafv2_web_acl_logging_configuration" "this" {
+  resource_arn = aws_wafv2_web_acl.this.arn
+  # WAF rejects the `:*` stream suffix on a log group destination. The AWS provider already strips it
+  # from `.arn`; trimming is belt-and-braces so a provider change can't break the apply.
+  log_destination_configs = [trimsuffix(aws_cloudwatch_log_group.waf.arn, ":*")]
+
+  # WAF logs full request headers. Redact the two that carry credentials so a session bearer token
+  # can never be replayed out of CloudWatch Logs — the log is for attribution, not for secrets.
+  redacted_fields {
+    single_header {
+      name = "authorization"
+    }
+  }
+
+  redacted_fields {
+    single_header {
+      name = "cookie"
+    }
+  }
+
+  depends_on = [aws_cloudwatch_log_resource_policy.waf_logs]
+}
+
 output "web_acl_arn" {
   value = aws_wafv2_web_acl.this.arn
 }
 
 output "web_acl_name" {
   value = aws_wafv2_web_acl.this.name
+}
+
+output "log_group_name" {
+  description = "CloudWatch log group holding this region's WAF request logs."
+  value       = aws_cloudwatch_log_group.waf.name
 }

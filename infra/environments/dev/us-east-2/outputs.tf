@@ -99,3 +99,9 @@ output "alb_arn_suffix" {
 output "health_check_id" {
   value = aws_route53_health_check.regional.id
 }
+
+# Where this region's WAF request logs land (client IP / URI / rule matches) — the source-attribution
+# record for an abuse investigation. Query with CloudWatch Logs Insights.
+output "waf_log_group_name" {
+  value = module.waf.log_group_name
+}

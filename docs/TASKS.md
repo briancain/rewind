@@ -108,6 +108,25 @@ delete.)
   reconcilers, vs. auto-cleaning old drafts — which overlaps legitimate long-lived drafts and the raw
   bucket's abort-incomplete-MPU lifecycle).
 
+- [ ] **ALB access logs to S3.** Request attribution is now covered twice (WAF request logs + the
+  client IP on every service's request span — see DESIGN §10.8), so the ALB's own access log is
+  additive rather than required: it would add response-side fields (`elb_status_code`,
+  `target_processing_time`, TLS cipher, `trace_id`) that the application logs largely already carry
+  keyed by `request_id`. Deferred because enabling it needs a new S3 bucket + the ELB log-delivery
+  bucket policy **and** a change to the `alb.ingress.kubernetes.io/load-balancer-attributes`
+  annotation on the Ingress that provisions the live ALB — the riskiest edit in the observability
+  set for the smallest marginal gain. Worth doing when a question needs ALB-side timing (e.g.
+  distinguishing target latency from ALB queueing during a flood).
+
+- [ ] **Auth-scoped WAF rate-based rule.** The web ACL's per-IP limit is 2000 req/5-min, tuned for
+  volumetric floods — roughly an order of magnitude above what a single IP needs to run an effective
+  invite-code / credential guessing loop against `POST /register` + `POST /login`, so that traffic is
+  invisible to the block-based alarms. Add a second rate-based rule scoped by a `byte_match_statement`
+  on those two paths at a much lower limit (order of 100 req/5-min per IP). Kept separate from the
+  global limit deliberately: lowering *that* would rate-limit ordinary read traffic arriving from
+  behind a shared NAT. Needs a threshold chosen against real login volume first, plus a decision on
+  whether it blocks or counts initially.
+
 ## Future ideas
 
 - [ ] **Content moderation + site admin.** No admin/moderation capability exists today — no way to
