@@ -529,7 +529,11 @@ resource "aws_cloudwatch_metric_alarm" "waf_auth_rate_limit_blocking" {
 # latency/5xx/canary alarms. The band self-trains from history (widens on low/erratic traffic), so
 # early on it is a coarse signal that tightens as data accumulates. Note the baseline here is mostly
 # Route 53 health checks, which are steady — that makes the band tight, so a modest multiple of
-# normal traffic can cross it. Pair this with the WAF request logs to see whether the surge is one
+# normal traffic can cross it. The band width is 5 (not the CloudWatch-default 3) deliberately: with a
+# near-idle dev baseline (health checks + the hourly canary, ~150 req/5min, essentially zero organic
+# users) a single legitimate browsing session fans out into a few hundred chatty SPA calls and reads
+# as a 3-sigma anomaly — so 3 tripped on ordinary use. 5 rides out normal browsing while still
+# catching a genuine surge. Pair this with the WAF request logs to see whether a surge is one
 # source or many before treating it as a DDoS.
 resource "aws_cloudwatch_metric_alarm" "alb_request_flood" {
   alarm_name          = "${var.name}-alb-request-flood"
@@ -554,7 +558,7 @@ resource "aws_cloudwatch_metric_alarm" "alb_request_flood" {
   }
   metric_query {
     id          = "band"
-    expression  = "ANOMALY_DETECTION_BAND(reqs, 3)"
+    expression  = "ANOMALY_DETECTION_BAND(reqs, 5)"
     label       = "RequestCount (expected band)"
     return_data = true
   }
