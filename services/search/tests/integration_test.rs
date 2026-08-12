@@ -154,3 +154,138 @@ async fn search_no_results() {
     assert_eq!(body["total"], 0);
     assert_eq!(body["results"].as_array().unwrap().len(), 0);
 }
+
+async fn index_doc(app: &Router, doc: Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/index")
+                .header("content-type", "application/json")
+                .body(Body::from(doc.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+async fn refresh_index() {
+    let http = reqwest::Client::new();
+    let url = format!(
+        "{}/videos/_refresh",
+        std::env::var("OPENSEARCH_ENDPOINT").unwrap_or_else(|_| "http://localhost:9200".into())
+    );
+    http.post(&url).send().await.unwrap();
+}
+
+/// The clickable-hashtag path: `?tag=` filters on the exact tag (case-insensitively), excluding
+/// videos that merely mention the term in their title/description, and returns them newest-first.
+#[tokio::test]
+async fn tag_search_is_exact_case_insensitive_and_newest_first() {
+    let app = setup().await;
+
+    // Tagged "cats" (lowercase), oldest.
+    index_doc(
+        &app,
+        json!({
+            "video_id": "cat-old",
+            "title": "Kittens playing",
+            "description": "fluffy",
+            "tags": ["cats"],
+            "channel_id": "user-1",
+            "created_at": "2026-01-01T00:00:00Z"
+        }),
+    )
+    .await;
+
+    // Tagged "Cats" (mixed case) — must still match; newest of the two tagged videos.
+    index_doc(
+        &app,
+        json!({
+            "video_id": "cat-new",
+            "title": "More cute animals",
+            "description": "adorable",
+            "tags": ["Cats", "cute"],
+            "channel_id": "user-2",
+            "created_at": "2026-03-01T00:00:00Z"
+        }),
+    )
+    .await;
+
+    // NOT tagged cats — only mentions "cats" in the title. Must be excluded from a tag filter
+    // (this is the key difference from the free-text `?q=` path).
+    index_doc(
+        &app,
+        json!({
+            "video_id": "dog-mention",
+            "title": "Why cats are better than dogs",
+            "description": "a debate",
+            "tags": ["dogs"],
+            "channel_id": "user-3",
+            "created_at": "2026-02-01T00:00:00Z"
+        }),
+    )
+    .await;
+
+    refresh_index().await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/search?tag=cats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+
+    // Exactly the two tagged videos — the title-mention is excluded, and mixed case is grouped.
+    assert_eq!(body["total"], 2, "expected exactly the two tagged videos");
+    let ids: Vec<&str> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["video_id"].as_str().unwrap())
+        .collect();
+    // Newest-first ordering: cat-new (Mar) before cat-old (Jan).
+    assert_eq!(ids, vec!["cat-new", "cat-old"]);
+    assert!(!ids.contains(&"dog-mention"));
+}
+
+/// A tag with no videos returns an empty result (not a 4xx/5xx).
+#[tokio::test]
+async fn tag_search_no_match_is_empty() {
+    let app = setup().await;
+
+    index_doc(
+        &app,
+        json!({
+            "video_id": "v1",
+            "title": "Something",
+            "tags": ["rust"],
+            "channel_id": "user-1",
+            "created_at": "2026-01-01T00:00:00Z"
+        }),
+    )
+    .await;
+    refresh_index().await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/search?tag=nonexistent")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["results"].as_array().unwrap().len(), 0);
+}

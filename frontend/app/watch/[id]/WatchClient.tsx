@@ -206,7 +206,13 @@ export default function WatchClient({ id }: { id: string }) {
       <div className="flex items-center gap-2 mt-2 flex-wrap">
         {meta.genre && <span className="text-xs bg-neutral-800 px-2 py-0.5 rounded">{meta.genre}</span>}
         {meta.tags?.map((tag) => (
-          <span key={tag} className="text-xs bg-neutral-800 text-neutral-300 px-2 py-0.5 rounded">#{tag}</span>
+          <Link
+            key={tag}
+            href={`/search?tag=${encodeURIComponent(tag)}`}
+            className="text-xs bg-neutral-800 text-neutral-300 px-2 py-0.5 rounded hover:bg-neutral-700 hover:text-white transition"
+          >
+            #{tag}
+          </Link>
         ))}
       </div>
 

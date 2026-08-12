@@ -3,6 +3,7 @@ import { useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { svc } from "@/lib/api";
 import { formatDuration, timeAgo } from "@/lib/format";
+import { resolveSearchView } from "@/lib/search";
 import { Thumbnail } from "@/components/Thumbnail";
 import Link from "next/link";
 
@@ -50,27 +51,33 @@ function SearchResultCard({ video }: { video: VideoResult }) {
 
 function SearchResults() {
   const searchParams = useSearchParams();
-  const q = searchParams.get("q") || "";
+  const view = resolveSearchView(searchParams.get("q"), searchParams.get("tag"));
   const [results, setResults] = useState<VideoResult[]>([]);
   const [total, setTotal] = useState(0);
 
   useEffect(() => {
-    if (!q) return;
-    svc<{ results: VideoResult[]; total: number }>("search", `/search?q=${encodeURIComponent(q)}`)
+    if (!view.path) return;
+    setResults([]);
+    setTotal(0);
+    svc<{ results: VideoResult[]; total: number }>("search", view.path)
       .then((r) => { setResults(r.results); setTotal(r.total); })
       .catch(() => {});
-  }, [q]);
+  }, [view.path]);
+
+  if (view.mode === "empty") {
+    return <p className="text-neutral-400">Enter a search term to find videos.</p>;
+  }
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-2">Search: &quot;{q}&quot;</h1>
+      <h1 className="text-2xl font-bold mb-2">{view.heading}</h1>
       <p className="text-sm text-neutral-400 mb-6">{total} results</p>
       <div className="space-y-4">
         {results.map((v) => (
           <SearchResultCard key={v.video_id} video={v} />
         ))}
       </div>
-      {results.length === 0 && q && <p className="text-neutral-400">No results found.</p>}
+      {results.length === 0 && <p className="text-neutral-400">{view.emptyMessage}</p>}
     </div>
   );
 }
