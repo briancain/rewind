@@ -140,6 +140,35 @@ variable "playback_client_errors_threshold" {
   default     = 10
 }
 
+# --- Attack-detection thresholds (see the request-flood-harmful composite + error-ratio + vuln-scan
+# alarms). These detect DDoS / scans by HARM and SIGNATURE, not by raw request volume — volume alone
+# can't separate an attack from a flash crowd, which is why the raw RequestCount anomaly alarm is a
+# silent input to a composite rather than a standalone alert. ---
+
+variable "error_ratio_min_requests" {
+  description = "Volume floor for the error-ratio alarms: RequestCount (Sum/5min) must exceed this before the 5xx/4xx ratio alarms evaluate, so a handful of errors against a near-idle baseline (mostly health checks) can't peg the ratio to 100% and fire. ~300/5min ≈ 1 req/s, just above the health-check + hourly-canary floor."
+  type        = number
+  default     = 300
+}
+
+variable "error_ratio_5xx_threshold_pct" {
+  description = "5xx responses as a PERCENT of total ALB requests ((target + ELB 5xx) / RequestCount, per 5 min) above which the error-ratio alarm fires, once past error_ratio_min_requests. Baseline-independent: unlike a raw count or a volume anomaly, a ratio means the same thing at 150 or 1.5M req/5min — a real fraction of traffic is failing (a flood degrading the service, a bad deploy). Distinct from the absolute alb-5xx-spike alarm, which fires on count regardless of load."
+  type        = number
+  default     = 5
+}
+
+variable "error_ratio_4xx_threshold_pct" {
+  description = "4xx responses as a PERCENT of total ALB requests (per 5 min) above which the alarm fires, once past error_ratio_min_requests. A coarse, scale-free abuse/scan backstop: a vuln-scan's wall of 404s to nonexistent paths drives the 4xx fraction up. Kept high because ALB 4xx also counts legitimate 401/403/404 (unauth calls before login, missing videos); the precise path-probing signal is the app-wide vuln-scan-404 alarm. Fires only when the MAJORITY of edge traffic is failing."
+  type        = number
+  default     = 40
+}
+
+variable "vuln_scan_404_threshold" {
+  description = "App-wide 404s (Sum/5min, across the Rust services + frontend) above which the vuln-scan alarm fires. A path-probing scanner (/.env, /wp-login.php, /.git/config, …) generates a burst of 404s that the default-allow WAF managed rules often DON'T block (they match known exploit signatures, not merely-nonexistent paths). Well above the handful of legitimate 404s (missing/deleted videos) normal use produces."
+  type        = number
+  default     = 100
+}
+
 variable "log_group_prefix" {
   description = "CloudWatch log group for EKS application logs"
   type        = string
@@ -378,6 +407,34 @@ resource "aws_cloudwatch_log_metric_filter" "frontend_playback_errors" {
   }
 }
 
+# App-wide 404s -> the vuln-scan-404 metric (see the vuln_scan_404 alarm). Two filters feed one metric
+# because the Rust services and the Next.js frontend log status at different JSON paths
+# ($.log_processed.fields.status vs the frontend's flat $.log_processed.status). Legitimate 404s
+# (missing / deleted videos) sit far below the alarm threshold, so no exclusion list is needed.
+resource "aws_cloudwatch_log_metric_filter" "service_404" {
+  name           = "${var.name}-service-404"
+  log_group_name = var.log_group_prefix
+  pattern        = "{ $.log_processed.fields.status = 404 }"
+
+  metric_transformation {
+    name      = "vuln-scan-404"
+    namespace = "${var.name}/CustomerExperience"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "frontend_404" {
+  name           = "${var.name}-frontend-404"
+  log_group_name = var.log_group_prefix
+  pattern        = "{ $.kubernetes.container_name = \"frontend\" && $.log_processed.status = 404 }"
+
+  metric_transformation {
+    name      = "vuln-scan-404"
+    namespace = "${var.name}/CustomerExperience"
+    value     = "1"
+  }
+}
+
 # --- Alarms: Infrastructure Health ---
 
 resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
@@ -518,32 +575,27 @@ resource "aws_cloudwatch_metric_alarm" "waf_auth_rate_limit_blocking" {
   tags = var.tags
 }
 
-# L7 request-flood / scanner-sweep signal. The rate-based rules only block a source IP that exceeds
-# their per-IP limit, so anything staying UNDER that limit passes straight through and is invisible to
-# every block-based alarm. Two shapes do this: a distributed flood (many IPs, each modest) and — just
-# as commonly — a single-source scanner or scripted sweep whose rate is nowhere near the volumetric
-# limit. Either way it only surfaces later as latency/5xx. This watches total inbound RequestCount
-# against a CloudWatch anomaly-detection band trained on normal traffic, so an abnormal surge is
-# reported up front. Ticket-severity + sustained (2 of 3 periods) to ride out the noise a low-traffic
-# baseline produces; genuine customer impact from a flood is separately caught (and paged) by the
-# latency/5xx/canary alarms. The band self-trains from history (widens on low/erratic traffic), so
-# early on it is a coarse signal that tightens as data accumulates. Note the baseline here is mostly
-# Route 53 health checks, which are steady — that makes the band tight, so a modest multiple of
-# normal traffic can cross it. The band width is 5 (not the CloudWatch-default 3) deliberately: with a
-# near-idle dev baseline (health checks + the hourly canary, ~150 req/5min, essentially zero organic
-# users) a single legitimate browsing session fans out into a few hundred chatty SPA calls and reads
-# as a 3-sigma anomaly — so 3 tripped on ordinary use. 5 rides out normal browsing while still
-# catching a genuine surge. Pair this with the WAF request logs to see whether a surge is one
-# source or many before treating it as a DDoS.
+# L7 request-flood signal — RAW request-volume anomaly. IMPORTANT: this alarm is a SILENT INPUT to the
+# request-flood-harmful composite below (and a dashboard diagnostic); it has NO alarm_actions and never
+# alerts on its own. Rationale: total RequestCount vs. a trained band cannot distinguish an attack from
+# normal usage — a flash crowd, a launch, a marketing email, or a video going viral all spike volume
+# identically to an L7 flood, so alerting on volume alone pages on your best days as loudly as on
+# attacks. It was also structurally noisy here: the band trains on a near-idle baseline (~150 req/5min,
+# almost all Route 53 health checks), so even a couple of real browser sessions — chatty SPA + per-
+# subdomain CORS preflights — cross it. Attacks are instead detected by HARM and SIGNATURE: the
+# composite (volume anomaly AND 5xx/latency/edge-rate-limiting), the baseline-independent error-RATIO
+# alarms, and the app-wide vuln-scan-404 alarm. The band width stays 5 (vs. CloudWatch-default 3): it
+# only needs to be a coarse "is volume unusual" gate for the composite, and 5 keeps the gate from being
+# tripped by every browsing session. Pair with the WAF request logs to see one-source-vs-distributed.
 resource "aws_cloudwatch_metric_alarm" "alb_request_flood" {
   alarm_name          = "${var.name}-alb-request-flood"
   comparison_operator = "GreaterThanUpperThreshold"
   evaluation_periods  = 3
   datapoints_to_alarm = 2
   threshold_metric_id = "band"
-  alarm_description   = "ALB request volume is anomalously high — an L7 flood or a scanner sweep, from a single IP or many, staying under the WAF per-IP rate limits. Check the WAF logs to see if it is one source or distributed"
-  alarm_actions       = [local.ticket_topic_arn]
-  treat_missing_data  = "notBreaching"
+  alarm_description   = "RAW ALB request-volume anomaly. SILENT INPUT to the ${var.name}-alb-request-flood-harmful composite (no action on its own) + a dashboard diagnostic — volume alone can't tell an attack from a flash crowd, so it only alerts when it coincides with harm."
+  # No alarm_actions: composite input + dashboard diagnostic, not a standalone alert (see comment above).
+  treat_missing_data = "notBreaching"
 
   metric_query {
     id          = "reqs"
@@ -562,6 +614,155 @@ resource "aws_cloudwatch_metric_alarm" "alb_request_flood" {
     label       = "RequestCount (expected band)"
     return_data = true
   }
+
+  tags = var.tags
+}
+
+# Composite: an anomalous request-volume surge that is ACTUALLY HURTING the service. Volume alone
+# can't distinguish an attack from a flash crowd / launch / viral video (all spike RequestCount
+# identically), so the raw anomaly alarm above is a SILENT input here and never alerts on its own.
+# This fires only when the volume anomaly coincides with a harm signal — target 5xx, ALB-generated
+# 5xx (503 / no-healthy-host), sustained high p95 latency, or edge rate-limiting of clients — i.e. a
+# flood degrading the platform, not merely a busy day. Ticket-severity: the outage-class harm inputs
+# (ELB 5xx) already page in their own right; this composite is the attack-correlation signal on top.
+resource "aws_cloudwatch_composite_alarm" "request_flood_harmful" {
+  alarm_name        = "${var.name}-alb-request-flood-harmful"
+  alarm_description = "Anomalous ALB request volume AND corroborating harm (target/ELB 5xx, p95 latency, or edge rate-limiting) — an L7 flood degrading the service, not a flash crowd. Check the WAF request logs for one-source-vs-distributed."
+  alarm_actions     = [local.ticket_topic_arn]
+
+  alarm_rule = join(" ", [
+    "ALARM(\"${aws_cloudwatch_metric_alarm.alb_request_flood.alarm_name}\")",
+    "AND (",
+    "ALARM(\"${aws_cloudwatch_metric_alarm.alb_5xx.alarm_name}\")",
+    "OR ALARM(\"${aws_cloudwatch_metric_alarm.alb_elb_5xx.alarm_name}\")",
+    "OR ALARM(\"${aws_cloudwatch_metric_alarm.alb_latency.alarm_name}\")",
+    "OR ALARM(\"${aws_cloudwatch_metric_alarm.waf_rate_limit_blocking.alarm_name}\")",
+    ")",
+  ])
+
+  tags = var.tags
+}
+
+# Baseline-independent 5xx error RATIO. The absolute alb-5xx-spike alarm fires on count; this fires on
+# the FRACTION of requests failing, so it means "a real proportion of traffic is broken" at ANY scale
+# (unchanged if this became a high-traffic platform). Guarded by a volume floor so a couple of 5xx
+# against a near-idle baseline can't read as 100%. Metric math: percent = 100*(target+ELB 5xx)/total.
+resource "aws_cloudwatch_metric_alarm" "error_ratio_5xx" {
+  alarm_name          = "${var.name}-error-ratio-5xx"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  datapoints_to_alarm = 2
+  threshold           = var.error_ratio_5xx_threshold_pct
+  alarm_description   = "ALB 5xx (target + ELB) exceeded ${var.error_ratio_5xx_threshold_pct}% of requests for 2 of 3 periods (above ${var.error_ratio_min_requests} req/5min) — a real fraction of traffic is failing"
+  alarm_actions       = [local.ticket_topic_arn]
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id          = "req"
+    return_data = false
+    metric {
+      metric_name = "RequestCount"
+      namespace   = "AWS/ApplicationELB"
+      period      = 300
+      stat        = "Sum"
+      dimensions  = { LoadBalancer = var.alb_arn_suffix }
+    }
+  }
+  metric_query {
+    id          = "t5xx"
+    return_data = false
+    metric {
+      metric_name = "HTTPCode_Target_5XX_Count"
+      namespace   = "AWS/ApplicationELB"
+      period      = 300
+      stat        = "Sum"
+      dimensions  = { LoadBalancer = var.alb_arn_suffix }
+    }
+  }
+  metric_query {
+    id          = "e5xx"
+    return_data = false
+    metric {
+      metric_name = "HTTPCode_ELB_5XX_Count"
+      namespace   = "AWS/ApplicationELB"
+      period      = 300
+      stat        = "Sum"
+      dimensions  = { LoadBalancer = var.alb_arn_suffix }
+    }
+  }
+  metric_query {
+    id          = "ratio"
+    expression  = "IF(req > ${var.error_ratio_min_requests}, 100 * (t5xx + e5xx) / req, 0)"
+    label       = "5xx % of requests"
+    return_data = true
+  }
+
+  tags = var.tags
+}
+
+# Baseline-independent 4xx error RATIO — a coarse, scale-free abuse/scan backstop (see
+# error_ratio_4xx_threshold_pct). Precise path-probing detection is the vuln-scan-404 alarm below;
+# this catches the broader "most of our edge traffic is failing" shape (mass scan / broken contract).
+resource "aws_cloudwatch_metric_alarm" "error_ratio_4xx" {
+  alarm_name          = "${var.name}-error-ratio-4xx"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  datapoints_to_alarm = 2
+  threshold           = var.error_ratio_4xx_threshold_pct
+  alarm_description   = "ALB 4xx exceeded ${var.error_ratio_4xx_threshold_pct}% of requests for 2 of 3 periods (above ${var.error_ratio_min_requests} req/5min) — the majority of edge traffic is failing (mass scan or broken client contract)"
+  alarm_actions       = [local.ticket_topic_arn]
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id          = "req"
+    return_data = false
+    metric {
+      metric_name = "RequestCount"
+      namespace   = "AWS/ApplicationELB"
+      period      = 300
+      stat        = "Sum"
+      dimensions  = { LoadBalancer = var.alb_arn_suffix }
+    }
+  }
+  metric_query {
+    id          = "t4xx"
+    return_data = false
+    metric {
+      metric_name = "HTTPCode_Target_4XX_Count"
+      namespace   = "AWS/ApplicationELB"
+      period      = 300
+      stat        = "Sum"
+      dimensions  = { LoadBalancer = var.alb_arn_suffix }
+    }
+  }
+  metric_query {
+    id          = "ratio"
+    expression  = "IF(req > ${var.error_ratio_min_requests}, 100 * t4xx / req, 0)"
+    label       = "4xx % of requests"
+    return_data = true
+  }
+
+  tags = var.tags
+}
+
+# Vulnerability-scan / path-probing detector. A scanner sweeping for nonexistent paths generates a
+# burst of 404s that the default-allow WAF managed rules frequently DON'T block (they match known
+# exploit signatures, not merely-nonexistent paths), so it is invisible to the WAF block alarms and —
+# being modest-volume — to the request-flood anomaly. Keys on the app-wide 404 metric (fed by both the
+# Rust-service and frontend log filters). Sustained (2 of 3) to ride out a lone 404 blip.
+resource "aws_cloudwatch_metric_alarm" "vuln_scan_404" {
+  alarm_name          = "${var.name}-vuln-scan-404"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  datapoints_to_alarm = 2
+  metric_name         = "vuln-scan-404"
+  namespace           = "${var.name}/CustomerExperience"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = var.vuln_scan_404_threshold
+  alarm_description   = "App-wide 404s > ${var.vuln_scan_404_threshold}/5min for 2 of 3 periods — likely a path-probing vulnerability scan. Check the WAF request logs for the source IP and the URIs being probed"
+  alarm_actions       = [local.ticket_topic_arn]
+  treat_missing_data  = "notBreaching"
 
   tags = var.tags
 }

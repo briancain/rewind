@@ -77,9 +77,9 @@ locals {
   services = ["identity", "video-catalog", "upload", "streaming", "social", "search", "transcode", "frontend"]
 
   # Each region occupies a vertical band: a height-2 header text widget, then the metric grid
-  # (original single-region layout offset by +2), then a diagnostics row at +38. Band height = 44;
-  # region idx i starts at i*44.
-  band_height = 44
+  # (original single-region layout offset by +2), a diagnostics row at +38, and an L7 traffic /
+  # edge-harm diagnostics row at +44. Band height = 50; region idx i starts at i*50.
+  band_height = 50
 
   widgets = flatten([
     for idx, r in var.regions : [
@@ -358,6 +358,47 @@ locals {
             [{ expression = "SEARCH('{AWS/DynamoDB,Operation,TableName} MetricName=\"SystemErrors\"', 'Sum', 300)", id = "ddberr", label = "DDB SystemErrors" }],
             [{ expression = "SEARCH('{AWS/ApplicationELB,LoadBalancer,TargetGroup} MetricName=\"UnHealthyHostCount\" LoadBalancer=\"${data.terraform_remote_state.region[r].outputs.alb_arn_suffix}\"', 'Maximum', 60)", id = "unhealthy", label = "ALB unhealthy hosts" }],
             ["AWS/SQS", "ApproximateAgeOfOldestMessage", "QueueName", local.completions_queue_name, { stat = "Maximum", period = 60, label = "Completions queue age (s)" }],
+          ]
+          view = "timeSeries"
+        }
+      },
+      # L7 traffic-volume diagnostic — raw RequestCount vs. its anomaly band. This is the DEMOTED
+      # request-flood signal (DESIGN §10.8): dashboard-only, because volume alone can't tell an attack
+      # from a flash crowd. It ALARMS only via the request-flood-harmful composite (volume anomaly AND
+      # harm). This widget is the "why" you consult when that composite (or a ratio alarm) fires.
+      {
+        type   = "metric"
+        x      = 0
+        y      = idx * local.band_height + 44
+        width  = 12
+        height = 6
+        properties = {
+          title  = "L7 Request Volume vs. Anomaly Band (diagnostic)"
+          region = r
+          metrics = [
+            ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", data.terraform_remote_state.region[r].outputs.alb_arn_suffix, { id = "reqs", stat = "Sum", period = 300, label = "RequestCount/5min" }],
+            [{ expression = "ANOMALY_DETECTION_BAND(reqs, 5)", id = "band", label = "expected band" }],
+          ]
+          view = "timeSeries"
+        }
+      },
+      # Edge errors + WAF blocks diagnostic — the corroborating inputs to the request-flood-harmful
+      # composite and the error-ratio / vuln-scan alarms. A real attack shows here (4xx/5xx and blocks
+      # climb together); a flash crowd spikes volume with these flat.
+      {
+        type   = "metric"
+        x      = 12
+        y      = idx * local.band_height + 44
+        width  = 12
+        height = 6
+        properties = {
+          title  = "Edge Errors & WAF Blocks (diagnostic)"
+          region = r
+          metrics = [
+            ["AWS/ApplicationELB", "HTTPCode_Target_4XX_Count", "LoadBalancer", data.terraform_remote_state.region[r].outputs.alb_arn_suffix, { stat = "Sum", period = 300, label = "target 4xx" }],
+            ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", data.terraform_remote_state.region[r].outputs.alb_arn_suffix, { stat = "Sum", period = 300, label = "target 5xx" }],
+            ["AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", data.terraform_remote_state.region[r].outputs.alb_arn_suffix, { stat = "Sum", period = 300, label = "ELB 5xx (503)" }],
+            ["AWS/WAFV2", "BlockedRequests", "WebACL", "${var.name}-alb", "Region", r, "Rule", "ALL", { stat = "Sum", period = 300, label = "WAF blocked (all rules)" }],
           ]
           view = "timeSeries"
         }
