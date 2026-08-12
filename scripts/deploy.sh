@@ -16,6 +16,12 @@ if [ ! -d "$TF_DIR" ]; then
 fi
 echo "▶ Target region: $REGION  ($TF_DIR)"
 
+# Tee everything (stdout + stderr) to a timestamped /tmp log so a deploy can be followed live and
+# shared/inspected afterward. Override the path with DEPLOY_LOG=... if desired.
+LOG_FILE="${DEPLOY_LOG:-/tmp/rewind-deploy-${REGION}-$(date +%Y%m%d-%H%M%S).log}"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "▶ Logging to $LOG_FILE"
+
 SERVICES=(identity video-catalog upload transcode streaming social search delete-cleanup)
 
 echo "▶ Reading Terraform outputs..."
